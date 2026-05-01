@@ -112,7 +112,6 @@ while ($true) {
         '1' {
             # Setup Wizard
             & "$PSScriptRoot/New-MigrationConfig.ps1"
-            Pause-ForUser
         }
         '2' {
             # Prerequisites

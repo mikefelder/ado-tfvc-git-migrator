@@ -159,7 +159,7 @@ if ($config.collections.Count -gt 0) {
 
 $addMore = $true
 while ($addMore) {
-    $collName = Read-WithDefault -Prompt 'Collection name (or press Enter when done)'
+    $collName = Read-WithDefault -Prompt 'Add a collection — enter its name (or press Enter if done adding collections)'
     if ([string]::IsNullOrWhiteSpace($collName)) {
         if ($config.collections.Count -eq 0) {
             Write-Host "  You need at least one collection. Please enter a name." -ForegroundColor Red

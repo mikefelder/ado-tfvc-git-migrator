@@ -1,0 +1,43 @@
+{
+    "adoServerUrl": "https://ado.mcdermott.com",
+    "collections": {
+        "GAMS": {
+            "pat": "YOUR_PAT_HERE",
+            "description": "GAMS collection — legacy TFVC repos"
+        },
+        "TargetCollection": {
+            "pat": "YOUR_PAT_HERE",
+            "description": "Target collection for reorganized repos"
+        }
+    },
+    "outputDirectory": "./output",
+    "logDirectory": "./logs",
+    "gitTfsPath": null,
+    "authorMappingFile": null,
+    "defaultBranch": "main",
+    "github": {
+        "enterpriseUrl": "https://github.mcdermott.com",
+        "apiUrl": "https://github.mcdermott.com/api/v3",
+        "pat": "YOUR_GITHUB_PAT_HERE",
+        "defaultOrg": "McDermott"
+    },
+    "migrationDefaults": {
+        "includeHistory": true,
+        "historyDepthLimit": null,
+        "excludePatterns": [
+            "**/bin/**",
+            "**/obj/**",
+            "**/packages/**",
+            "**/.vs/**",
+            "**/node_modules/**"
+        ],
+        "gitLfsExtensions": [
+            "*.dll",
+            "*.exe",
+            "*.zip",
+            "*.nupkg",
+            "*.pdb"
+        ],
+        "cleanupBinaries": true
+    }
+}

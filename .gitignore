@@ -1,0 +1,15 @@
+# Migration outputs
+output/
+logs/
+
+# Config with secrets
+config/migration-config.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vs/
+.vscode/
+*.swp

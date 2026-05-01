@@ -1,0 +1,51 @@
+{
+    "migrations": [
+        {
+            "name": "Legacy App — Full Repo Migration",
+            "type": "full",
+            "sourceCollection": "GAMS",
+            "sourceProject": "LegacyApp",
+            "tfvcPath": "$/LegacyApp",
+            "gitHubOrg": "McDermott",
+            "gitHubRepo": "legacy-app",
+            "description": "Full TFVC migration of LegacyApp"
+        },
+        {
+            "name": "MonoRepo — Split Into Services",
+            "type": "split",
+            "sourceCollection": "GAMS",
+            "sourceProject": "MonoRepo",
+            "tfvcPath": "$/MonoRepo",
+            "splits": [
+                {
+                    "tfvcFolder": "$/MonoRepo/ServiceA",
+                    "gitHubOrg": "McDermott",
+                    "gitHubRepo": "service-a"
+                },
+                {
+                    "tfvcFolder": "$/MonoRepo/ServiceB",
+                    "gitHubOrg": "McDermott",
+                    "gitHubRepo": "service-b"
+                },
+                {
+                    "tfvcFolder": "$/MonoRepo/SharedLib",
+                    "gitHubOrg": "McDermott",
+                    "gitHubRepo": "shared-lib"
+                }
+            ]
+        },
+        {
+            "name": "OldProject Component — Move to ModernApps then GitHub",
+            "type": "move",
+            "sourceCollection": "GAMS",
+            "sourceProject": "OldProject",
+            "tfvcPath": "$/OldProject/Component",
+            "targetCollection": "TargetCollection",
+            "targetProject": "Platform",
+            "targetRepoName": "component",
+            "gitHubOrg": "McDermott",
+            "gitHubRepo": "component",
+            "description": "Moved from GAMS to ModernApps, then to GitHub"
+        }
+    ]
+}

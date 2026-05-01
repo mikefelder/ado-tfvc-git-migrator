@@ -11,8 +11,13 @@
     - Last changeset per path (activity indicator)
     - Unique committer identities (for author mapping)
 
+    Supports -Interactive mode to select collections and output format via menus.
+
 .PARAMETER ConfigPath
     Path to migration-config.json.
+
+.PARAMETER Interactive
+    Launch interactive mode — select collections and options via menus.
 
 .PARAMETER Collections
     Optional. Limit discovery to specific collection names. Default: all collections in config.
@@ -27,7 +32,8 @@
     Output format: Table, Json, Csv. Default: Table.
 
 .EXAMPLE
-    ./Invoke-TfvcDiscovery.ps1 -ConfigPath ./config/migration-config.json
+    # Interactive mode
+    ./Invoke-TfvcDiscovery.ps1 -ConfigPath ./config/migration-config.json -Interactive
 
 .EXAMPLE
     ./Invoke-TfvcDiscovery.ps1 -ConfigPath ./config/migration-config.json -Collections GAMS -Depth 3 -OutputFormat Json
@@ -37,6 +43,8 @@
 param(
     [Parameter(Mandatory)]
     [string]$ConfigPath,
+
+    [switch]$Interactive,
 
     [string[]]$Collections,
 
@@ -56,6 +64,77 @@ Import-Module "$PSScriptRoot/modules/AdoTfvcMigrator.psm1" -Force
 $config = Read-MigrationConfig -ConfigPath $ConfigPath
 $logFile = Initialize-MigrationLog -LogDirectory $config.logDirectory -ScriptName 'TfvcDiscovery'
 
+# ─── Interactive Mode ──────────────────────────────────────────────────────────
+
+if ($Interactive) {
+    Show-MenuHeader -Title "Discover TFVC Repositories"
+    Write-Host "This will scan your ADO collections and list all TFVC repos and folders." -ForegroundColor DarkGray
+    Write-Host "No changes are made — this is a read-only scan." -ForegroundColor DarkGray
+
+    # 1. Pick collections
+    $collectionNames = @($config.collections.Keys | Sort-Object)
+
+    Write-Host ""
+    Write-Host "  Which collections to scan?" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [1] All collections ($($collectionNames.Count) configured)" -ForegroundColor White
+    Write-Host "  [2] Pick specific collection(s)" -ForegroundColor White
+    Write-Host "  [0] Cancel" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Choice: " -ForegroundColor Yellow -NoNewline
+    $collChoice = Read-Host
+
+    switch ($collChoice.Trim()) {
+        '0' { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+        '2' {
+            $displayItems = $collectionNames | ForEach-Object {
+                $desc = $config.collections[$_].description
+                if ($desc) { "$_ — $desc" } else { $_ }
+            }
+            Show-MenuHeader -Title "Select collection(s) to scan"
+            $selectedIndices = Show-NumberedMenu -Items $displayItems -Prompt 'Select collection(s)' -MultiSelect -AllowBack
+            if ($null -eq $selectedIndices) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+            $Collections = @($selectedIndices | ForEach-Object { $collectionNames[$_] })
+        }
+    }
+
+    # 2. Depth
+    Write-Host ""
+    Write-Host "  How many folder levels deep to scan? [2]: " -ForegroundColor Yellow -NoNewline
+    $depthInput = Read-Host
+    if ($depthInput.Trim() -match '^\d+$') {
+        $Depth = [int]$depthInput.Trim()
+    }
+
+    # 3. Output format
+    Write-Host ""
+    Write-Host "  Output format:" -ForegroundColor White
+    Write-Host "  [1] Table (display on screen)" -ForegroundColor White
+    Write-Host "  [2] CSV file (for Excel)" -ForegroundColor White
+    Write-Host "  [3] JSON file" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Choice [1]: " -ForegroundColor Yellow -NoNewline
+    $fmtChoice = Read-Host
+
+    switch ($fmtChoice.Trim()) {
+        '2' { $OutputFormat = 'Csv' }
+        '3' { $OutputFormat = 'Json' }
+        default { $OutputFormat = 'Table' }
+    }
+
+    # 4. Author map
+    Write-Host ""
+    Write-Host "  Generate an author mapping template (for converting usernames to Git emails)? [y/N]: " -ForegroundColor Yellow -NoNewline
+    $authorChoice = Read-Host
+    if ($authorChoice.Trim() -match '^[Yy]') {
+        $GenerateAuthorMap = $true
+    }
+
+    Write-Host ""
+    Write-Host "  Starting scan..." -ForegroundColor Cyan
+    Write-Host ""
+}
+
 Write-MigrationLog -Message "Starting TFVC discovery" -LogFile $logFile -Level INFO
 Write-MigrationLog -Message "ADO Server: $($config.adoServerUrl)" -LogFile $logFile
 
@@ -71,8 +150,13 @@ $targetCollections = if ($Collections) {
 
 $allResults = [System.Collections.ArrayList]::new()
 $allAuthors = [System.Collections.ArrayList]::new()
+$collectionIndex = 0
+$collectionTotal = @($targetCollections).Count
 
 foreach ($collectionName in $targetCollections) {
+    $collectionIndex++
+    Write-Host "  Scanning collection $collectionIndex of ${collectionTotal}: $collectionName" -ForegroundColor Cyan
+
     $collectionConfig = $config.collections[$collectionName]
     if (-not $collectionConfig) {
         Write-MigrationLog -Message "Collection '$collectionName' not found in config — skipping" -LogFile $logFile -Level WARN
@@ -93,9 +177,13 @@ foreach ($collectionName in $targetCollections) {
 
     # Get all projects
     $projects = Get-AdoProjects -ServerUrl $config.adoServerUrl -Collection $collectionName -Pat $pat
+    $projectIndex = 0
+    $projectTotal = @($projects).Count
 
     foreach ($project in $projects) {
+        $projectIndex++
         $projectName = $project.name
+        Write-Host "    Project $projectIndex of ${projectTotal}: $projectName" -ForegroundColor DarkGray
         Write-MigrationLog -Message "  Scanning project: $projectName" -LogFile $logFile
 
         # Check for TFVC repo

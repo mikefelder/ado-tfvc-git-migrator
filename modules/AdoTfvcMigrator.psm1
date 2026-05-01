@@ -229,7 +229,7 @@ function Find-GitTfs {
         return $found.Source
     }
 
-    throw "git-tfs not found. Install it: https://github.com/git-tfs/git-tfs/releases or set gitTfsPath in config."
+    throw "git-tfs not found. Install it from https://github.com/git-tfs/git-tfs/releases or set gitTfsPath in your config file."
 }
 
 function Invoke-GitTfs {
@@ -258,9 +258,31 @@ function Invoke-GitTfs {
     }
 
     $process = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
+
+    # Stream output line-by-line so the user sees progress
+    $lastStatusTime = [datetime]::MinValue
+    $lineCount = 0
+    $allStdout = [System.Text.StringBuilder]::new()
+    $allStderr = [System.Text.StringBuilder]::new()
+
+    # Read stdout asynchronously to avoid deadlocks
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
+    # Show a spinner while waiting
+    $spinChars = @('|', '/', '-', '\')
+    $spinIdx = 0
+    while (-not $process.HasExited) {
+        $elapsed = (Get-Date) - $process.StartTime
+        $spinChar = $spinChars[$spinIdx % 4]
+        $spinIdx++
+        Write-Host "`r  $spinChar  Converting... (elapsed: $($elapsed.ToString('hh\:mm\:ss')))  " -NoNewline -ForegroundColor DarkGray
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Host "`r  ✓  Conversion process finished.                              " -ForegroundColor Green
+
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
 
     if ($LogFile) {
         $stdout | Out-File -FilePath $LogFile -Append -Encoding utf8
@@ -431,10 +453,251 @@ function Test-AdoConnection {
         }
     }
     catch {
+        $friendlyError = Get-FriendlyError -ErrorMessage $_.Exception.Message
         return @{
             Connected = $false
-            Error     = $_.Exception.Message
+            Error     = $friendlyError
         }
+    }
+}
+
+function Get-FriendlyError {
+    <#
+    .SYNOPSIS
+        Translates common technical error messages into plain English.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ErrorMessage
+    )
+
+    if ($ErrorMessage -match 'Unauthorized|401') {
+        return "Authentication failed — your PAT (Personal Access Token) may be expired or invalid. Generate a new one in ADO and update your config."
+    }
+    if ($ErrorMessage -match 'Forbidden|403') {
+        return "Access denied — your PAT doesn't have the required permissions. Make sure it has 'Code (Read & Write)' and 'Project (Read)' scopes."
+    }
+    if ($ErrorMessage -match '404|Not Found') {
+        return "The server, collection, or project was not found. Double-check the URL and collection name in your config."
+    }
+    if ($ErrorMessage -match 'Unable to connect|No such host|Name.*not.*resolve|connection.*refused|timed out') {
+        return "Cannot reach the ADO server. Check that the server URL in your config is correct and that you're connected to the network (VPN, etc.)."
+    }
+    if ($ErrorMessage -match '409|already exists') {
+        return "A resource with that name already exists at the destination."
+    }
+    if ($ErrorMessage -match '503|Service Unavailable') {
+        return "The ADO server is temporarily unavailable. Wait a moment and try again."
+    }
+    if ($ErrorMessage -match 'git-tfs.*not found|git tfs.*not recognized') {
+        return "The git-tfs tool is not installed. Run Install-Prerequisites.ps1 for installation instructions."
+    }
+
+    # Return original if no match
+    return $ErrorMessage
+}
+
+# ─── Interactive Menu Helpers ─────────────────────────────────────────────────
+
+function Show-MenuHeader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Title
+    )
+
+    Write-Host ""
+    Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "  $Title" -ForegroundColor Cyan
+    Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+function Show-NumberedMenu {
+    <#
+    .SYNOPSIS
+        Displays a numbered list of items and returns the user's selection(s).
+    .PARAMETER Items
+        Array of display strings.
+    .PARAMETER Prompt
+        Text shown before the menu.
+    .PARAMETER MultiSelect
+        Allow comma-separated multiple selections.
+    .PARAMETER AllowBack
+        Show a "[0] Back" option.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Items,
+        [string]$Prompt = 'Select an option',
+        [switch]$MultiSelect,
+        [switch]$AllowBack
+    )
+
+    for ($i = 0; $i -lt $Items.Count; $i++) {
+        Write-Host "  [$($i + 1)] $($Items[$i])" -ForegroundColor White
+    }
+    if ($AllowBack) {
+        Write-Host "  [0] Back" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+
+    while ($true) {
+        if ($MultiSelect) {
+            Write-Host "$Prompt (comma-separated, e.g. 1,3,5): " -ForegroundColor Yellow -NoNewline
+        }
+        else {
+            Write-Host "${Prompt}: " -ForegroundColor Yellow -NoNewline
+        }
+        $userChoice = Read-Host
+
+        if ($AllowBack -and $userChoice.Trim() -eq '0') {
+            return $null
+        }
+
+        if ($MultiSelect) {
+            $indices = $userChoice -split ',' | ForEach-Object {
+                $val = $_.Trim()
+                if ($val -match '^\d+$') { [int]$val - 1 }
+            }
+            $valid = $indices | Where-Object { $_ -ge 0 -and $_ -lt $Items.Count }
+            if ($valid.Count -gt 0) {
+                return $valid
+            }
+        }
+        else {
+            if ($userChoice.Trim() -match '^\d+$') {
+                $idx = [int]$userChoice.Trim() - 1
+                if ($idx -ge 0 -and $idx -lt $Items.Count) {
+                    return $idx
+                }
+            }
+        }
+
+        Write-Host "  Invalid selection. Please enter a number from the list above." -ForegroundColor Red
+    }
+}
+
+function Select-AdoCollection {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Config,
+        [string]$Prompt = 'Select a collection'
+    )
+
+    $collectionNames = @($Config.collections.Keys | Sort-Object)
+    if ($collectionNames.Count -eq 0) {
+        throw "No collections defined in config."
+    }
+
+    $displayItems = $collectionNames | ForEach-Object {
+        $desc = $Config.collections[$_].description
+        if ($desc) { "$_ — $desc" } else { $_ }
+    }
+
+    Show-MenuHeader -Title $Prompt
+    $idx = Show-NumberedMenu -Items $displayItems -Prompt $Prompt
+    if ($null -eq $idx) { return $null }
+
+    return $collectionNames[$idx]
+}
+
+function Select-AdoProject {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Config,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [string]$Prompt = 'Select a project'
+    )
+
+    $pat = $Config.collections[$Collection].pat
+    Write-Host "  Fetching projects from '$Collection'..." -ForegroundColor DarkGray
+    $projects = Get-AdoProjects -ServerUrl $Config.adoServerUrl -Collection $Collection -Pat $pat
+    $projectNames = @($projects.name | Sort-Object)
+
+    if ($projectNames.Count -eq 0) {
+        Write-Host "  No projects found in collection '$Collection'." -ForegroundColor Red
+        return $null
+    }
+
+    Show-MenuHeader -Title "$Prompt (Collection: $Collection)"
+    $idx = Show-NumberedMenu -Items $projectNames -Prompt $Prompt -AllowBack
+    if ($null -eq $idx) { return $null }
+
+    return $projectNames[$idx]
+}
+
+function Select-TfvcFolders {
+    <#
+    .SYNOPSIS
+        Lists TFVC folders under a given path and lets the user pick one or more.
+    .OUTPUTS
+        Array of selected TFVC folder paths, or $null if user chose Back.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Config,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$ProjectName,
+        [string]$ParentPath,
+        [switch]$MultiSelect,
+        [string]$Prompt = 'Select folder(s)'
+    )
+
+    $pat = $Config.collections[$Collection].pat
+    $rootPath = if ($ParentPath) { $ParentPath } else { "`$/$ProjectName" }
+
+    Write-Host "  Fetching TFVC contents under '$rootPath'..." -ForegroundColor DarkGray
+
+    try {
+        $items = Get-TfvcItems -ServerUrl $Config.adoServerUrl -Collection $Collection `
+            -Pat $pat -ScopePath $rootPath -RecursionLevel 1
+    }
+    catch {
+        Write-Host "  Could not list items under '$rootPath': $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+
+    $folders = @($items | Where-Object { $_.isFolder -eq $true -and $_.path -ne $rootPath } | Sort-Object path)
+
+    if ($folders.Count -eq 0) {
+        Write-Host "  No subfolders found under '$rootPath'." -ForegroundColor Yellow
+        return $null
+    }
+
+    # Build display with last-changeset info
+    $displayItems = foreach ($folder in $folders) {
+        $lastInfo = ''
+        try {
+            $cs = Get-TfvcChangesets -ServerUrl $Config.adoServerUrl -Collection $Collection `
+                -Pat $pat -ScopePath $folder.path -Top 1
+            if ($cs) {
+                $date = ([datetime]$cs[0].createdDate).ToString('yyyy-MM-dd')
+                $lastInfo = "  (last change: $date)"
+            }
+        }
+        catch { }
+        "$($folder.path)$lastInfo"
+    }
+
+    Show-MenuHeader -Title "$Prompt (under $rootPath)"
+    $selectedIndices = Show-NumberedMenu -Items $displayItems -Prompt $Prompt -MultiSelect:$MultiSelect -AllowBack
+
+    if ($null -eq $selectedIndices) { return $null }
+
+    if ($MultiSelect) {
+        return @($selectedIndices | ForEach-Object { $folders[$_].path })
+    }
+    else {
+        return @($folders[$selectedIndices].path)
     }
 }
 

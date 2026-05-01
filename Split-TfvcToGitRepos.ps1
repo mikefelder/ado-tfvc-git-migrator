@@ -10,14 +10,21 @@
        into its own standalone Git repo with only the relevant history
     3. Each output repo is independent and ready for GitHub push
 
+    Supports an -Interactive mode that lets you browse TFVC folders, multi-select
+    which ones to split out, name each output repo, and optionally choose a
+    destination collection/project for each.
+
 .PARAMETER ConfigPath
     Path to migration-config.json.
 
+.PARAMETER Interactive
+    Launch interactive mode — browse and select folders via menus.
+
 .PARAMETER Collection
-    ADO collection name.
+    ADO collection name (skipped in interactive mode).
 
 .PARAMETER ProjectName
-    Team project name.
+    Team project name (skipped in interactive mode).
 
 .PARAMETER TfvcPath
     Root TFVC path to clone (e.g., $/MyProject).
@@ -34,6 +41,11 @@
     Number of changesets to include. Null = full history.
 
 .EXAMPLE
+    # Interactive mode — guided menus
+    ./Split-TfvcToGitRepos.ps1 -ConfigPath ./config/migration-config.json -Interactive
+
+.EXAMPLE
+    # Direct mode — all parameters specified
     ./Split-TfvcToGitRepos.ps1 -ConfigPath ./config/migration-config.json `
         -Collection GAMS -ProjectName "MonoRepo" -TfvcPath "$/MonoRepo" `
         -FolderMappings @{ '$/MonoRepo/ServiceA' = 'service-a'; '$/MonoRepo/ServiceB' = 'service-b' }
@@ -49,13 +61,10 @@ param(
     [Parameter(Mandatory)]
     [string]$ConfigPath,
 
-    [Parameter(Mandatory)]
+    [switch]$Interactive,
+
     [string]$Collection,
-
-    [Parameter(Mandatory)]
     [string]$ProjectName,
-
-    [Parameter(Mandatory)]
     [string]$TfvcPath,
 
     [hashtable]$FolderMappings,
@@ -75,10 +84,164 @@ $logFile = Initialize-MigrationLog -LogDirectory $config.logDirectory -ScriptNam
 
 Write-MigrationLog -Message "Starting TFVC folder split" -LogFile $logFile -Level INFO
 
+# ─── Interactive Mode ──────────────────────────────────────────────────────────
+
+if ($Interactive) {
+    Show-MenuHeader -Title "Split TFVC Repo Into Separate Git Repos"
+    Write-Host "This wizard will walk you through selecting a TFVC project," -ForegroundColor DarkGray
+    Write-Host "picking folders to split out, and naming each output repo." -ForegroundColor DarkGray
+
+    # ── 1. Pick collection ──
+    $Collection = Select-AdoCollection -Config $config -Prompt 'Select collection'
+    if (-not $Collection) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+
+    # ── 2. Pick project ──
+    $ProjectName = Select-AdoProject -Config $config -Collection $Collection -Prompt 'Select project'
+    if (-not $ProjectName) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+
+    $TfvcPath = "`$/$ProjectName"
+
+    # ── 3. Browse folders and optionally drill down ──
+    $currentPath = $TfvcPath
+    $selectedFolders = $null
+
+    while ($true) {
+        $selectedFolders = Select-TfvcFolders -Config $config -Collection $Collection `
+            -ProjectName $ProjectName -ParentPath $currentPath `
+            -Prompt 'Select folder(s) to split into separate repos' -MultiSelect
+        if (-not $selectedFolders) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+
+        # Show what was selected and allow drill-down or confirm
+        Write-Host ""
+        Write-Host "  Selected $($selectedFolders.Count) folder(s):" -ForegroundColor Green
+        foreach ($f in $selectedFolders) {
+            Write-Host "    • $f" -ForegroundColor White
+        }
+        Write-Host ""
+        Write-Host "  [1] Confirm these selections" -ForegroundColor White
+        Write-Host "  [2] Drill into a folder to pick subfolders instead" -ForegroundColor White
+        Write-Host "  [3] Start over from project root" -ForegroundColor White
+        Write-Host "  [0] Cancel" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "Choice: " -ForegroundColor Yellow -NoNewline
+        $drillChoice = Read-Host
+
+        switch ($drillChoice.Trim()) {
+            '1' { break }
+            '2' {
+                if ($selectedFolders.Count -eq 1) {
+                    $currentPath = $selectedFolders[0]
+                }
+                else {
+                    Write-Host ""
+                    Write-Host "  Pick which folder to drill into:" -ForegroundColor Yellow
+                    $drillIdx = Show-NumberedMenu -Items $selectedFolders -Prompt 'Drill into' -AllowBack
+                    if ($null -ne $drillIdx) {
+                        $currentPath = $selectedFolders[$drillIdx]
+                    }
+                }
+                $selectedFolders = $null
+                continue
+            }
+            '3' {
+                $currentPath = $TfvcPath
+                $selectedFolders = $null
+                continue
+            }
+            '0' { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+            default { break }
+        }
+        if ($selectedFolders) { break }
+    }
+
+    # ── 4. Name each output repo ──
+    $FolderMappings = @{}
+
+    Show-MenuHeader -Title "Name Output Repositories"
+    Write-Host "  For each selected folder, provide a Git repo name." -ForegroundColor DarkGray
+    Write-Host "  Press Enter to accept the suggested default." -ForegroundColor DarkGray
+    Write-Host ""
+
+    foreach ($folder in $selectedFolders) {
+        $leafName = ($folder -split '/')[-1].ToLower()
+        $defaultName = ($leafName -replace '[^a-z0-9\-]', '-')
+
+        Write-Host "  $folder" -ForegroundColor White
+        Write-Host "    Repo name [$defaultName]: " -ForegroundColor Yellow -NoNewline
+        $nameInput = Read-Host
+        $repoName = if ($nameInput.Trim()) { $nameInput.Trim() } else { $defaultName }
+        $FolderMappings[$folder] = $repoName
+        Write-Host "    → $repoName" -ForegroundColor Green
+        Write-Host ""
+    }
+
+    # ── 5. History depth ──
+    Write-Host "  History depth (enter for full history, or a number): " -ForegroundColor Yellow -NoNewline
+    $depthInput = Read-Host
+    if ($depthInput.Trim() -match '^\d+$') {
+        $HistoryDepth = [int]$depthInput.Trim()
+    }
+
+    # ── 6. Optional: choose destination collection/project for each ──
+    Write-Host ""
+    Write-Host "  Push split repos to a different ADO collection after splitting? [y/N]: " -ForegroundColor Yellow -NoNewline
+    $pushToAdo = Read-Host
+
+    $adoDestinations = @{}
+    if ($pushToAdo.Trim() -match '^[Yy]') {
+        $destCollection = Select-AdoCollection -Config $config -Prompt 'Select DESTINATION collection'
+        if ($destCollection) {
+            $destProject = Select-AdoProject -Config $config -Collection $destCollection -Prompt 'Select DESTINATION project'
+            if ($destProject) {
+                foreach ($folder in $selectedFolders) {
+                    $adoDestinations[$folder] = @{
+                        Collection = $destCollection
+                        Project    = $destProject
+                        RepoName   = $FolderMappings[$folder]
+                    }
+                }
+            }
+        }
+    }
+
+    # ── Confirm ──
+    Show-MenuHeader -Title "Confirm Split Plan"
+    Write-Host "  Source: $Collection / $ProjectName ($TfvcPath)" -ForegroundColor White
+    if ($HistoryDepth) {
+        Write-Host "  History: $HistoryDepth changesets" -ForegroundColor White
+    }
+    else {
+        Write-Host "  History: Full" -ForegroundColor White
+    }
+    Write-Host ""
+    Write-Host "  Splits:" -ForegroundColor White
+    foreach ($folder in $FolderMappings.Keys) {
+        $line = "    $folder → $($FolderMappings[$folder])"
+        if ($adoDestinations.ContainsKey($folder)) {
+            $dest = $adoDestinations[$folder]
+            $line += " → push to $($dest.Collection)/$($dest.Project)"
+        }
+        Write-Host $line -ForegroundColor Cyan
+    }
+    Write-Host ""
+    Write-Host "  Proceed? [Y/n]: " -ForegroundColor Yellow -NoNewline
+    $confirm = Read-Host
+    if ($confirm.Trim() -match '^[Nn]') {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        return
+    }
+}
+
+# ─── Validate required params in non-interactive mode ──────────────────────────
+
+if (-not $Collection)  { throw "Collection is required. Use -Interactive or provide -Collection." }
+if (-not $ProjectName) { throw "ProjectName is required. Use -Interactive or provide -ProjectName." }
+if (-not $TfvcPath)    { throw "TfvcPath is required. Use -Interactive or provide -TfvcPath." }
+
 # ─── Resolve Mappings ─────────────────────────────────────────────────────────
 
 if (-not $FolderMappings -and -not $MappingsFile) {
-    throw "Provide either -FolderMappings or -MappingsFile."
+    throw "Provide -FolderMappings, -MappingsFile, or use -Interactive."
 }
 
 if ($MappingsFile) {
@@ -117,7 +280,14 @@ $stagingPath = Join-Path $config.outputDirectory $stagingName
 Write-MigrationLog -Message "Step 1: Cloning full TFVC repo to staging area" -LogFile $logFile -Level INFO
 
 if (Test-Path $stagingPath) {
-    Write-MigrationLog -Message "Staging path exists, removing: $stagingPath" -LogFile $logFile -Level WARN
+    Write-MigrationLog -Message "Staging path exists: $stagingPath" -LogFile $logFile -Level WARN
+    Write-Host "  The staging directory already exists: $stagingPath" -ForegroundColor Yellow
+    Write-Host "  Delete it and start fresh? [Y/n]: " -ForegroundColor Yellow -NoNewline
+    $confirm = Read-Host
+    if ($confirm.Trim() -match '^[Nn]') {
+        Write-Host "  Cancelled." -ForegroundColor Yellow
+        return
+    }
     Remove-Item -Recurse -Force $stagingPath
 }
 
@@ -162,6 +332,13 @@ foreach ($tfvcFolder in $FolderMappings.Keys) {
     Write-MigrationLog -Message "Step 2: Extracting '$tfvcFolder' → '$repoName'" -LogFile $logFile -Level INFO
 
     if (Test-Path $outputPath) {
+        Write-Host "  Output directory already exists: $outputPath" -ForegroundColor Yellow
+        Write-Host "  Overwrite? [Y/n]: " -ForegroundColor Yellow -NoNewline
+        $overwrite = Read-Host
+        if ($overwrite.Trim() -match '^[Nn]') {
+            Write-MigrationLog -Message "  Skipping '$repoName' — output directory already exists" -LogFile $logFile -Level WARN
+            continue
+        }
         Remove-Item -Recurse -Force $outputPath
     }
 
@@ -230,6 +407,38 @@ Remove-Item -Recurse -Force $stagingPath
 Write-Host ""
 Write-MigrationLog -Message "Split complete! Results:" -LogFile $logFile -Level SUCCESS
 $results | Format-Table -AutoSize
+
+# ─── Push to ADO destinations (interactive mode) ──────────────────────────────
+
+if ($Interactive -and $adoDestinations -and $adoDestinations.Count -gt 0) {
+    Write-Host ""
+    Write-MigrationLog -Message "Pushing split repos to destination collection..." -LogFile $logFile -Level INFO
+
+    foreach ($folder in $adoDestinations.Keys) {
+        $dest = $adoDestinations[$folder]
+        $repoName = $dest.RepoName
+        $repoPath = Join-Path $config.outputDirectory $repoName
+
+        if (Test-Path (Join-Path $repoPath '.git')) {
+            try {
+                & "$PSScriptRoot/Move-RepoToCollection.ps1" `
+                    -ConfigPath $ConfigPath `
+                    -SourceCollection $Collection `
+                    -SourceProject $ProjectName `
+                    -TfvcPath $folder `
+                    -TargetCollection $dest.Collection `
+                    -TargetProject $dest.Project `
+                    -TargetRepoName $repoName `
+                    -SkipTargetRepoCreation:$false
+
+                Write-MigrationLog -Message "Pushed $repoName to $($dest.Collection)/$($dest.Project)" -LogFile $logFile -Level SUCCESS
+            }
+            catch {
+                Write-MigrationLog -Message "Failed to push $repoName — $($_.Exception.Message)" -LogFile $logFile -Level ERROR
+            }
+        }
+    }
+}
 
 Write-Host ""
 Write-Host "Next steps — push each repo to GitHub:" -ForegroundColor Cyan

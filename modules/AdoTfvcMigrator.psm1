@@ -271,7 +271,9 @@ function Invoke-GitTfs {
 
     $cmd = "git tfs $Arguments"
 
-    Write-MigrationLog -Message "Running: $cmd" -LogFile $LogFile -Level INFO
+    # Redact PAT from log output
+    $logCmd = $cmd -replace '--password="[^"]*"', '--password="***"'
+    Write-MigrationLog -Message "Running: $logCmd" -LogFile $LogFile -Level INFO
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = 'git'

@@ -251,8 +251,8 @@ if ($authorFile -and (Test-Path $authorFile)) {
     Write-MigrationLog -Message "  Using author mapping: $authorFile" -LogFile $logFile
 }
 
-# Set PAT via environment variable for git-tfs authentication
-$env:GIT_TFS_PAT = $pat
+# Authenticate with PAT (passed as --username / --password so git-tfs actually uses it)
+$cloneArgs += " --username=`"`" --password=`"$pat`""
 
 Write-Host "" -ForegroundColor White
 Write-Host "  ┌─────────────────────────────────────────────────────────┐" -ForegroundColor Cyan
@@ -283,9 +283,6 @@ catch {
     Write-Host "" -ForegroundColor Red
     Write-MigrationLog -Message "git-tfs clone failed: $($_.Exception.Message)" -LogFile $logFile -Level ERROR
     throw
-}
-finally {
-    Remove-Item Env:\GIT_TFS_PAT -ErrorAction SilentlyContinue
 }
 
 # ─── Post-Conversion ──────────────────────────────────────────────────────────

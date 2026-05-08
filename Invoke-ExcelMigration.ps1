@@ -250,12 +250,8 @@ foreach ($row in $excelData) {
         continue
     }
 
-    # Skip rows whose collection is not in the config (no PAT = can't migrate)
+    # Silently ignore rows whose collection is not in the config (no PAT = can't migrate)
     if (-not $config.collections[$collection]) {
-        $entry.Action = 'Skip'
-        $entry.Reason = "Collection '$collection' is not in your config file — skipped"
-        $entry.Status = 'Skipped'
-        [void]$skipRows.Add($entry)
         continue
     }
 

@@ -554,62 +554,72 @@ foreach ($group in $grouped) {
     if ($folderItems.Count -gt 0) {
         $parentRepoType = $folderItems[0].RepoType
 
-        if ($parentRepoType -eq 'TFVC') {
-            $parentOutputName = $sourceRepo -replace '[^a-zA-Z0-9_-]', '-'
-            $parentRepoPath = Join-Path $config.outputDirectory $parentOutputName
+        # Pre-clean staging directory to avoid interactive prompts in Split script
+        $stagingName = "staging-$(($sourceProject -replace '/', '-').ToLower())"
+        $stagingPath = Join-Path $config.outputDirectory $stagingName
+        if (Test-Path $stagingPath) {
+            Remove-Item -Recurse -Force $stagingPath
+        }
 
-            if (-not (Test-Path $parentRepoPath)) {
-                Write-Host ""
-                Write-Host "    Converting parent repo '$sourceRepo' to Git (needed for folder extraction)..." -ForegroundColor DarkGray
-
-                try {
-                    & "$PSScriptRoot/Convert-TfvcToGit.ps1" `
-                        -ConfigPath $ConfigPath `
-                        -Collection $sourceCollection `
-                        -ProjectName $sourceProject `
-                        -TfvcPath "`$/$sourceProject" `
-                        -OutputRepoName $parentOutputName
-
-                    Write-Host "    ✓ Parent repo converted" -ForegroundColor Green
-                }
-                catch {
-                    $friendlyMsg = Get-FriendlyError -ErrorMessage $_.Exception.Message
-                    Write-Host "    ✗ Could not convert parent repo: $friendlyMsg" -ForegroundColor Red
-                    Write-MigrationLog -Message "Failed to convert parent repo '$sourceRepo': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
-                    foreach ($fi in $folderItems) {
-                        $fi.Status = 'Failed'
-                        $fi.Error = "Could not convert the parent repo '$sourceRepo' — $friendlyMsg"
-                        $failCount++
-                    }
-                    $processedCount += $folderItems.Count
-                    continue
-                }
+        # Pre-clean output directories for each folder
+        foreach ($fi in $folderItems) {
+            $outPath = Join-Path $config.outputDirectory $fi.NewRepoName
+            if (Test-Path $outPath) {
+                Remove-Item -Recurse -Force $outPath
             }
         }
 
+        # Build batch mappings — all folders from this repo in one Split call
+        $batchMappings = @{}
+        foreach ($fi in $folderItems) {
+            $batchMappings["`$/$sourceProject/$($fi.Folder)"] = $fi.NewRepoName
+        }
+
+        Write-Host ""
+        Write-Host "    Extracting $($folderItems.Count) folder(s) from '$sourceRepo'..." -ForegroundColor Cyan
+
+        $splitFailed = $false
+        $splitError = ''
+
+        try {
+            & "$PSScriptRoot/Split-TfvcToGitRepos.ps1" `
+                -ConfigPath $ConfigPath `
+                -Collection $sourceCollection `
+                -ProjectName $sourceProject `
+                -TfvcPath "`$/$sourceProject" `
+                -FolderMappings $batchMappings
+
+            Write-Host "    ✓ All folders extracted" -ForegroundColor Green
+        }
+        catch {
+            $splitFailed = $true
+            $splitError = Get-FriendlyError -ErrorMessage $_.Exception.Message
+            Write-Host "    ✗ Folder extraction failed: $splitError" -ForegroundColor Red
+            Write-MigrationLog -Message "Split-TfvcToGitRepos failed for '$sourceRepo': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
+        }
+
+        # Move each extracted folder to the target (or mark as failed)
         foreach ($item in $folderItems) {
             $processedCount++
             $folderName = $item.Folder
+            $folderOutputName = $item.NewRepoName
+            $folderOutputPath = Join-Path $config.outputDirectory $folderOutputName
+
             Write-Host ""
             Write-Host "  Working on $processedCount of $($migrateRows.Count)..." -ForegroundColor Cyan
-            Write-Host "    Extracting folder: $sourceRepo / $folderName → new repo '$($item.NewRepoName)'" -ForegroundColor White
+
+            if ($splitFailed -or -not (Test-Path $folderOutputPath)) {
+                $item.Status = 'Failed'
+                $item.Error = if ($splitFailed) { "Folder extraction failed — $splitError" } else { "Output not found after extraction" }
+                $failCount++
+                Write-Host "    ✗ ${folderOutputName}: $($item.Error)" -ForegroundColor Red
+                Write-MigrationLog -Message "Skipping move for '$folderName' — extraction failed" -LogFile $logFile -Level ERROR
+                continue
+            }
+
+            Write-Host "    Moving '$folderOutputName' to $TargetCollection / $TargetProject..." -ForegroundColor White
 
             try {
-                $folderOutputName = $item.NewRepoName
-
-                $mappings = @{
-                    "`$/$sourceProject/$folderName" = $folderOutputName
-                }
-
-                & "$PSScriptRoot/Split-TfvcToGitRepos.ps1" `
-                    -ConfigPath $ConfigPath `
-                    -Collection $sourceCollection `
-                    -ProjectName $sourceProject `
-                    -TfvcPath "`$/$sourceProject" `
-                    -FolderMappings $mappings
-
-                Write-Host "    Moving to $TargetCollection / $TargetProject..." -ForegroundColor DarkGray
-
                 & "$PSScriptRoot/Move-RepoToCollection.ps1" `
                     -ConfigPath $ConfigPath `
                     -SourceCollection $sourceCollection `
@@ -629,8 +639,13 @@ foreach ($group in $grouped) {
                 $item.Error = Get-FriendlyError -ErrorMessage $_.Exception.Message
                 $failCount++
                 Write-Host "    ✗ Failed: $($item.Error)" -ForegroundColor Red
-                Write-MigrationLog -Message "Failed to extract '$folderName': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
+                Write-MigrationLog -Message "Failed to move '$folderName': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
             }
+        }
+
+        # Clean up staging directory
+        if (Test-Path $stagingPath) {
+            Remove-Item -Recurse -Force $stagingPath -ErrorAction SilentlyContinue
         }
     }
 }

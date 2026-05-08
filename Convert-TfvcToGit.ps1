@@ -234,6 +234,9 @@ if (Test-Path $outputPath) {
 
 # ─── Build git-tfs clone command ───────────────────────────────────────────────
 
+# Enable long paths to handle deeply nested TFVC directories (Windows 248-char limit)
+try { & git config --global core.longpaths true 2>$null } catch { }
+
 $tfsUrl = "$($config.adoServerUrl)/$Collection"
 $depth = if ($HistoryDepth) { $HistoryDepth } elseif ($config.migrationDefaults.historyDepthLimit) { $config.migrationDefaults.historyDepthLimit } else { $null }
 

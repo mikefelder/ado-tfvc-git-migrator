@@ -291,6 +291,9 @@ if (Test-Path $stagingPath) {
     Remove-Item -Recurse -Force $stagingPath
 }
 
+# Enable long paths to handle deeply nested TFVC directories (Windows 248-char limit)
+try { & git config --global core.longpaths true 2>$null } catch { }
+
 $tfsUrl = "$($config.adoServerUrl)/$Collection"
 $cloneArgs = "clone `"$tfsUrl`" `"$TfvcPath`" `"$stagingPath`""
 

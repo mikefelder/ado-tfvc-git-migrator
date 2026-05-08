@@ -223,6 +223,7 @@ Common issues and what to do:
 | "Authentication failed — your PAT may be expired" | PAT expired or wrong | Generate a new PAT in ADO and update your config |
 | "Access denied — your PAT doesn't have the required permissions" | Missing PAT scopes | Ensure `Code (Read & Write)` and `Project and Team (Read)` |
 | "Basic authentication requires a secure connection" | Server URL uses `http://` | Change `adoServerUrl` in your config to `https://` |
+| TF400959 "limit of 248 characters" | Windows path length limit hit by deeply nested TFVC files | The toolkit enables `core.longpaths` automatically. Also shorten `outputDirectory` in your config (e.g. `C:\M\Out` instead of a long user-profile path). On Windows, enable long paths system-wide via `reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v LongPathsEnabled /t REG_DWORD /d 1 /f` (requires admin + reboot). |
 | "Cannot reach the ADO server" | Network/VPN issue | Check VPN connection and server URL in config |
 | "git-tfs not found" | Tool not installed | Run `Install-Prerequisites.ps1` for instructions |
 | "Missing Required Module: ImportExcel" | ImportExcel not installed | Run `Install-Module ImportExcel -Scope CurrentUser -Force` |

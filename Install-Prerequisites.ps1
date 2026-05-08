@@ -416,6 +416,17 @@ switch ($gitLfsCheck.Status) {
 # ─── Network Connectivity (optional) ─────────────────────────────────────────
 
 Write-Host ""
+Write-Host "Checking ImportExcel module..." -NoNewline
+if (Get-Module -ListAvailable -Name ImportExcel) {
+    $mod = Get-Module -ListAvailable -Name ImportExcel | Select-Object -First 1
+    Write-Host " OK ($($mod.Version))" -ForegroundColor Green
+}
+else {
+    Write-Host " MISSING (needed for batch migration from spreadsheets)" -ForegroundColor Yellow
+    $missingOptional += 'ImportExcel'
+}
+
+Write-Host ""
 Write-Host "Network connectivity test..." -NoNewline
 Write-Host " SKIPPED (run Invoke-TfvcDiscovery.ps1 to test ADO connection)" -ForegroundColor Yellow
 
@@ -450,6 +461,16 @@ if ($allMissing.Count -gt 0) {
                 'Git'             { $installResults[$tool] = Install-Prereq-Git }
                 'git-tfs'         { $installResults[$tool] = Install-Prereq-GitTfs }
                 'Git-LFS'         { $installResults[$tool] = Install-Prereq-GitLfs }
+                'ImportExcel'     {
+                    Write-Host "  Installing ImportExcel PowerShell module..." -ForegroundColor Yellow
+                    try {
+                        Install-Module ImportExcel -Scope CurrentUser -Force -AcceptLicense -ErrorAction Stop
+                        $installResults[$tool] = $true
+                    } catch {
+                        Write-Host "  ERROR: Failed to install ImportExcel: $_" -ForegroundColor Red
+                        $installResults[$tool] = $false
+                    }
+                }
             }
             if ($installResults[$tool]) {
                 Write-Host "[$tool] Install completed." -ForegroundColor Green
@@ -525,6 +546,14 @@ if ($allMissing.Count -gt 0) {
                         $verifyFailed += $tool
                     }
                 }
+                'ImportExcel' {
+                    if (Get-Module -ListAvailable -Name ImportExcel) {
+                        Write-Host " OK" -ForegroundColor Green
+                    } else {
+                        Write-Host " FAILED" -ForegroundColor Red
+                        $verifyFailed += $tool
+                    }
+                }
             }
         }
 
@@ -548,6 +577,7 @@ if ($allMissing.Count -gt 0) {
                 'Git'             { Write-Host "  Git:             https://git-scm.com/downloads" -ForegroundColor Yellow }
                 'git-tfs'         { Write-Host "  git-tfs:         https://github.com/git-tfs/git-tfs/releases" -ForegroundColor Yellow }
                 'Git-LFS'         { Write-Host "  Git LFS:         https://git-lfs.github.com/" -ForegroundColor Yellow }
+                'ImportExcel'     { Write-Host "  ImportExcel:     Install-Module ImportExcel -Scope CurrentUser -Force" -ForegroundColor Yellow }
             }
         }
         Write-Host ""

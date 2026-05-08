@@ -267,14 +267,32 @@ foreach ($row in $excelData) {
             $entry.Action = 'SpinOutFolder'
             $entry.NewRepoName = "$($repoName)_$($folderName)" -replace '[^a-zA-Z0-9_-]', '-'
             $entry.Reason = "Extract folder '$folderName' from repo '$repoName' → new repo '$($entry.NewRepoName)'"
+            $entry.Status = 'Pending'
+            [void]$migrateRows.Add($entry)
         }
         else {
-            $entry.Action = 'MigrateRepo'
-            $entry.NewRepoName = $repoName -replace '[^a-zA-Z0-9_-]', '-'
-            $entry.Reason = "Migrate entire repo '$repoName' to Git"
+            # "Repo" means migrate the entire repo as one unit.
+            # Multiple spreadsheet rows may reference the same repo (one per subfolder) —
+            # only add it once; skip duplicate rows for the same Collection/Project/Repo.
+            $repoKey = "$($collection)|$($project)|$($repoName)"
+            $alreadyAdded = $migrateRows | Where-Object {
+                $_.Action -eq 'MigrateRepo' -and
+                "$($_.Collection)|$($_.Project)|$($_.Repo)" -eq $repoKey
+            }
+            if ($alreadyAdded) {
+                $entry.Action = 'Skip'
+                $entry.Reason = "Duplicate row — repo '$repoName' is already queued for full migration"
+                $entry.Status = 'Skipped'
+                [void]$skipRows.Add($entry)
+            }
+            else {
+                $entry.Action = 'MigrateRepo'
+                $entry.NewRepoName = $repoName -replace '[^a-zA-Z0-9_-]', '-'
+                $entry.Reason = "Migrate entire repo '$repoName' to Git"
+                $entry.Status = 'Pending'
+                [void]$migrateRows.Add($entry)
+            }
         }
-        $entry.Status = 'Pending'
-        [void]$migrateRows.Add($entry)
     }
     else {
         $entry.Action = 'Skip'

@@ -250,9 +250,13 @@ foreach ($row in $excelData) {
         continue
     }
 
-    # Validate: warn if collection is not in config
+    # Skip rows whose collection is not in the config (no PAT = can't migrate)
     if (-not $config.collections[$collection]) {
-        [void]$dataWarnings.Add("Row $($row.No): Collection '$collection' is not in your config file — this row will fail if migrated")
+        $entry.Action = 'Skip'
+        $entry.Reason = "Collection '$collection' is not in your config file — skipped"
+        $entry.Status = 'Skipped'
+        [void]$skipRows.Add($entry)
+        continue
     }
 
     # Classify by recommendation

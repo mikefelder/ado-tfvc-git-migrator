@@ -85,28 +85,26 @@ while ($true) {
 
     Write-Host "  What would you like to do?" -ForegroundColor White
     Write-Host ""
-    Write-Host "  ── Setup ──────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [1]  Setup Wizard          Create or update your configuration" -ForegroundColor White
-    Write-Host "  [2]  Check Prerequisites   Verify required tools are installed" -ForegroundColor White
+    Write-Host "  ── Getting Started ────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  [1]  Setup Wizard          Set up your server connection & settings" -ForegroundColor White
+    Write-Host "  [2]  Check Prerequisites   Make sure all required tools are installed" -ForegroundColor White
     Write-Host ""
-    Write-Host "  ── Discover ───────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [3]  Discover Repos        Scan & inventory all TFVC repos" -ForegroundColor White
+    Write-Host "  ── Explore ────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  [3]  Discover Repos        Scan the server and list all repositories" -ForegroundColor White
     Write-Host ""
-    Write-Host "  ── Migrate ────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [4]  Convert Repo          Convert a TFVC repo to Git" -ForegroundColor White
-    Write-Host "  [5]  Split Repo            Break a repo into multiple Git repos" -ForegroundColor White
-    Write-Host "  [6]  Move Repo             Move a repo to a different Collection" -ForegroundColor White
+    Write-Host "  ── Migrate (one at a time) ────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  [4]  Convert Repo          Convert a single repo from TFVC to Git" -ForegroundColor White
+    Write-Host "  [5]  Split Repo            Break one large repo into smaller Git repos" -ForegroundColor White
+    Write-Host "  [6]  Move Repo             Move a repo to a different collection" -ForegroundColor White
+    Write-Host "  [7]  Push to GitHub        Send a converted repo to GitHub" -ForegroundColor White
     Write-Host ""
-    Write-Host "  ── Publish ────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [7]  Push to GitHub        Push a converted repo to GitHub" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  ── Batch ──────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [8]  Run Migration Plan    Execute a batch migration plan" -ForegroundColor White
-    Write-Host "  [9]  Excel Migration       Migrate repos using MDR Excel file" -ForegroundColor White
-    Write-Host "  [10] Archive Repos         Archive repos using Dalptfs01 Excel file" -ForegroundColor White
+    Write-Host "  ── Batch (from spreadsheet) ───────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  [8]  Run Migration Plan    Execute a saved migration plan file" -ForegroundColor White
+    Write-Host "  [9]  Batch Migrate         Migrate all repos from the MDR spreadsheet" -ForegroundColor White
+    Write-Host "  [10] Batch Archive         Archive repos from the Dalptfs01 spreadsheet" -ForegroundColor White
     Write-Host ""
     Write-Host "  ── Other ──────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [11] View Logs             Open the logs directory" -ForegroundColor White
+    Write-Host "  [11] View Logs             Open the logs folder" -ForegroundColor White
     Write-Host "  [0]  Exit" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Select an option: " -ForegroundColor Yellow -NoNewline

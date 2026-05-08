@@ -28,20 +28,17 @@
 .PARAMETER TargetProject
     Target ADO project to move migrated repos into. Required.
 
-.PARAMETER DryRun
-    Preview what would be done without executing.
-
 .PARAMETER Interactive
-    Launch interactive mode — confirm settings via prompts.
+    Launch interactive mode — step-by-step guided flow with preview and confirmation.
+
+.EXAMPLE
+    # Interactive mode (recommended)
+    ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json -Interactive
 
 .EXAMPLE
     ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
         -ExcelPath ./excel-docs/MDR-4ADO-AllProjects.xlsx `
-        -TargetCollection "ModernApps" -TargetProject "Platform" -DryRun
-
-.EXAMPLE
-    # Interactive mode
-    ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json -Interactive
+        -TargetCollection "ModernApps" -TargetProject "Platform"
 #>
 
 [CmdletBinding()]
@@ -57,8 +54,6 @@ param(
 
     [string]$TargetProject,
 
-    [switch]$DryRun,
-
     [switch]$Interactive
 )
 
@@ -69,8 +64,16 @@ Import-Module "$PSScriptRoot/modules/AdoTfvcMigrator.psm1" -Force
 
 if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
     Write-Host ""
-    Write-Host "  The 'ImportExcel' PowerShell module is required to read Excel files." -ForegroundColor Red
-    Write-Host "  Install it with:  Install-Module ImportExcel -Scope CurrentUser -Force" -ForegroundColor Yellow
+    Write-Host "  ┌──────────────────────────────────────────────────────────┐" -ForegroundColor Red
+    Write-Host "  │  Missing Required Module: ImportExcel                    │" -ForegroundColor Red
+    Write-Host "  │                                                          │" -ForegroundColor Red
+    Write-Host "  │  This module is needed to read the Excel spreadsheet.    │" -ForegroundColor Red
+    Write-Host "  │                                                          │" -ForegroundColor Red
+    Write-Host "  │  To install it, run this command:                        │" -ForegroundColor Red
+    Write-Host "  │  Install-Module ImportExcel -Scope CurrentUser -Force    │" -ForegroundColor Yellow
+    Write-Host "  │                                                          │" -ForegroundColor Red
+    Write-Host "  │  Then come back and try again.                           │" -ForegroundColor Red
+    Write-Host "  └──────────────────────────────────────────────────────────┘" -ForegroundColor Red
     Write-Host ""
     return
 }
@@ -81,95 +84,127 @@ Import-Module ImportExcel
 $config = Read-MigrationConfig -ConfigPath $ConfigPath
 $logFile = Initialize-MigrationLog -LogDirectory $config.logDirectory -ScriptName 'ExcelMigration'
 
-# ─── Interactive Mode ──────────────────────────────────────────────────────────
+# ─── Step 1: Locate the Excel File ────────────────────────────────────────────
 
 if ($Interactive) {
     Show-MenuHeader -Title "Excel-Driven Batch Migration"
-    Write-Host "  This tool reads the MDR-4ADO-AllProjects Excel file and processes" -ForegroundColor DarkGray
-    Write-Host "  each repository according to the Recommendation column." -ForegroundColor DarkGray
+
+    Write-Host "  This tool will:" -ForegroundColor White
     Write-Host ""
-
-    # Excel file path
-    if (-not $ExcelPath) {
-        $defaultExcel = Join-Path $PSScriptRoot 'excel-docs/MDR-4ADO-AllProjects.xlsx'
-        if (Test-Path $defaultExcel) {
-            Write-Host "  Found Excel file: $defaultExcel" -ForegroundColor Green
-            Write-Host "  Use this file? [Y/n]: " -ForegroundColor Yellow -NoNewline
-            $useDefault = Read-Host
-            if ($useDefault.Trim() -match '^[Nn]') {
-                Write-Host "  Enter path to MDR-4ADO-AllProjects.xlsx: " -ForegroundColor Yellow -NoNewline
-                $ExcelPath = Read-Host
-            }
-            else {
-                $ExcelPath = $defaultExcel
-            }
-        }
-        else {
-            Write-Host "  Enter path to MDR-4ADO-AllProjects.xlsx: " -ForegroundColor Yellow -NoNewline
-            $ExcelPath = Read-Host
-        }
-    }
-
-    # Target collection
-    if (-not $TargetCollection) {
-        Write-Host ""
-        Write-Host "  Select the TARGET collection (where migrated repos will go):" -ForegroundColor White
-        $TargetCollection = Select-AdoCollection -Config $config -Prompt 'Target collection'
-        if (-not $TargetCollection) {
-            Write-Host "  Cancelled." -ForegroundColor Yellow
-            return
-        }
-    }
-
-    # Target project
-    if (-not $TargetProject) {
-        Write-Host ""
-        Write-Host "  Enter the target project name: " -ForegroundColor Yellow -NoNewline
-        $TargetProject = Read-Host
-        if (-not $TargetProject) {
-            Write-Host "  Cancelled." -ForegroundColor Yellow
-            return
-        }
-    }
-
-    # Dry run?
+    Write-Host "    1. Read the MDR-4ADO-AllProjects spreadsheet" -ForegroundColor DarkGray
+    Write-Host "    2. Show you exactly what will happen to each repository" -ForegroundColor DarkGray
+    Write-Host "    3. Ask for your confirmation before making any changes" -ForegroundColor DarkGray
+    Write-Host "    4. Migrate the repositories and produce a full report" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  Run as dry-run first (preview only, no changes)? [Y/n]: " -ForegroundColor Yellow -NoNewline
-    $dryChoice = Read-Host
-    if (-not ($dryChoice.Trim() -match '^[Nn]')) {
-        $DryRun = $true
-    }
+    Write-Host "  No changes are made until you explicitly confirm." -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  Step 1 of 4: Locate the spreadsheet" -ForegroundColor Cyan
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host ""
 }
 
-# ─── Validate Inputs ──────────────────────────────────────────────────────────
+if (-not $ExcelPath) {
+    $defaultExcel = Join-Path $PSScriptRoot 'excel-docs/MDR-4ADO-AllProjects.xlsx'
+    if (Test-Path $defaultExcel) {
+        if ($Interactive) {
+            Write-Host "  ✓ Found the spreadsheet automatically:" -ForegroundColor Green
+            Write-Host "    $defaultExcel" -ForegroundColor White
+            Write-Host ""
+        }
+        $ExcelPath = $defaultExcel
+    }
+    elseif ($Interactive) {
+        Write-Host "  The spreadsheet was not found in the expected location." -ForegroundColor Yellow
+        Write-Host "  Please enter the full path to MDR-4ADO-AllProjects.xlsx:" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  Path: " -ForegroundColor Yellow -NoNewline
+        $ExcelPath = Read-Host
+    }
+}
 
 if (-not $ExcelPath -or -not (Test-Path $ExcelPath)) {
-    throw "Excel file not found: $ExcelPath"
-}
-if (-not $TargetCollection) {
-    throw "TargetCollection is required."
-}
-if (-not $TargetProject) {
-    throw "TargetProject is required."
+    Write-Host ""
+    Write-Host "  Could not find the spreadsheet file." -ForegroundColor Red
+    Write-Host "  Make sure the file 'MDR-4ADO-AllProjects.xlsx' is in the excel-docs folder." -ForegroundColor Yellow
+    Write-Host ""
+    return
 }
 
-# ─── Read Excel Data ──────────────────────────────────────────────────────────
+# ─── Step 2: Choose the Target ────────────────────────────────────────────────
+
+if ($Interactive) {
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  Step 2 of 4: Where should migrated repos go?" -ForegroundColor Cyan
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Repos marked for migration will be moved to a target" -ForegroundColor DarkGray
+    Write-Host "  collection and project. Select them below." -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+if (-not $TargetCollection -and $Interactive) {
+    $TargetCollection = Select-AdoCollection -Config $config -Prompt 'Select the target collection'
+    if (-not $TargetCollection) {
+        Write-Host "  Cancelled." -ForegroundColor Yellow
+        return
+    }
+}
+
+if (-not $TargetProject -and $Interactive) {
+    Write-Host ""
+    Write-Host "  Enter the target project name: " -ForegroundColor Yellow -NoNewline
+    $TargetProject = Read-Host
+    if (-not $TargetProject) {
+        Write-Host "  Cancelled." -ForegroundColor Yellow
+        return
+    }
+}
+
+if (-not $TargetCollection -or -not $TargetProject) {
+    Write-Host "  Target collection and project are required." -ForegroundColor Red
+    return
+}
+
+# ─── Step 3: Read & Analyze the Spreadsheet ───────────────────────────────────
+
+if ($Interactive) {
+    Write-Host ""
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  Step 3 of 4: Reading the spreadsheet..." -ForegroundColor Cyan
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host ""
+}
 
 Write-MigrationLog -Message "Reading Excel file: $ExcelPath (sheet: $WorksheetName)" -LogFile $logFile -Level INFO
 
-$excelData = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName
+try {
+    $excelData = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName
+}
+catch {
+    Write-Host "  Could not read the spreadsheet." -ForegroundColor Red
+    Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Make sure the file is a valid Excel file and is not open in another program." -ForegroundColor Yellow
+    Write-Host ""
+    return
+}
 
 if (-not $excelData -or $excelData.Count -eq 0) {
-    throw "No data found in worksheet '$WorksheetName'."
+    Write-Host "  The spreadsheet appears to be empty." -ForegroundColor Red
+    Write-Host "  Expected data in worksheet: '$WorksheetName'" -ForegroundColor Yellow
+    Write-Host ""
+    return
 }
 
 Write-MigrationLog -Message "Loaded $($excelData.Count) rows from Excel" -LogFile $logFile -Level INFO
 
-# ─── Classify Rows ─────────────────────────────────────────────────────────────
+# ─── Classify Every Row ───────────────────────────────────────────────────────
 
 $migrateRows = [System.Collections.ArrayList]::new()
 $archiveRows = [System.Collections.ArrayList]::new()
 $skipRows = [System.Collections.ArrayList]::new()
+$dataWarnings = [System.Collections.ArrayList]::new()
 
 foreach ($row in $excelData) {
     $recommendation = ($row.Recommendation ?? '').ToString().Trim()
@@ -180,171 +215,223 @@ foreach ($row in $excelData) {
     $repoName = ($row.Repos ?? '').ToString().Trim()
     $folderName = ($row.'Applications/Folders' ?? '').ToString().Trim()
 
+    # Build a standard entry
+    $entry = [PSCustomObject]@{
+        RowNo          = $row.No
+        Collection     = $collection
+        Project        = $project
+        Repo           = $repoName
+        Folder         = $folderName
+        RepoType       = $reposType
+        RepoOrFolder   = $repoOrFolder
+        Recommendation = $recommendation
+        Action         = ''
+        Reason         = ''
+        Status         = ''
+        Error          = ''
+    }
+
     # Skip rows with no collection/project data
     if (-not $collection -or -not $project) {
-        [void]$skipRows.Add([PSCustomObject]@{
-            RowNo        = $row.No
-            Collection   = $collection
-            Project      = $project
-            Repo         = $repoName
-            Folder       = $folderName
-            RepoType     = $reposType
-            RepoOrFolder = $repoOrFolder
-            Recommendation = $recommendation
-            Action       = 'Skip'
-            Reason       = 'Missing collection or project'
-            Status       = 'Skipped'
-            Error        = ''
-        })
+        $entry.Action = 'Skip'
+        $entry.Reason = 'Missing collection or project name in spreadsheet'
+        $entry.Status = 'Skipped'
+        [void]$skipRows.Add($entry)
         continue
     }
 
     # Exclude BuildProcessTemplates
     if ($folderName -eq 'BuildProcessTemplates') {
-        [void]$skipRows.Add([PSCustomObject]@{
-            RowNo        = $row.No
-            Collection   = $collection
-            Project      = $project
-            Repo         = $repoName
-            Folder       = $folderName
-            RepoType     = $reposType
-            RepoOrFolder = $repoOrFolder
-            Recommendation = $recommendation
-            Action       = 'Skip'
-            Reason       = 'BuildProcessTemplates excluded'
-            Status       = 'Skipped'
-            Error        = ''
-        })
+        $entry.Action = 'Skip'
+        $entry.Reason = 'BuildProcessTemplates (system folder, excluded automatically)'
+        $entry.Status = 'Skipped'
+        [void]$skipRows.Add($entry)
         continue
     }
 
-    # Check recommendation
-    if ($recommendation -match '^Archive') {
-        [void]$archiveRows.Add([PSCustomObject]@{
-            RowNo        = $row.No
-            Collection   = $collection
-            Project      = $project
-            Repo         = $repoName
-            Folder       = $folderName
-            RepoType     = $reposType
-            RepoOrFolder = $repoOrFolder
-            Recommendation = $recommendation
-            Action       = 'Archive'
-            Reason       = "Recommendation: $recommendation"
-            Status       = 'Skipped'
-            Error        = ''
-        })
+    # Validate: warn if collection is not in config
+    if (-not $config.collections[$collection]) {
+        [void]$dataWarnings.Add("Row $($row.No): Collection '$collection' is not in your config file — this row will fail if migrated")
+    }
+
+    # Classify by recommendation
+    if ($recommendation -match '(?i)^archive') {
+        $entry.Action = 'Archive'
+        $entry.Reason = "Marked as '$recommendation' — will be skipped"
+        $entry.Status = 'Skipped'
+        [void]$archiveRows.Add($entry)
     }
     elseif ($recommendation -match '(?i)^migrate') {
-        $action = if ($repoOrFolder -eq 'Folder') { 'SpinOutFolder' } else { 'MigrateRepo' }
-        [void]$migrateRows.Add([PSCustomObject]@{
-            RowNo        = $row.No
-            Collection   = $collection
-            Project      = $project
-            Repo         = $repoName
-            Folder       = $folderName
-            RepoType     = $reposType
-            RepoOrFolder = $repoOrFolder
-            Recommendation = $recommendation
-            Action       = $action
-            Reason       = "Recommendation: $recommendation / Type: $repoOrFolder"
-            Status       = 'Pending'
-            Error        = ''
-        })
+        if ($repoOrFolder -eq 'Folder') {
+            $entry.Action = 'SpinOutFolder'
+            $entry.Reason = "Extract folder '$folderName' from repo '$repoName' into its own Git repo"
+        }
+        else {
+            $entry.Action = 'MigrateRepo'
+            $entry.Reason = "Migrate entire repo '$repoName' to Git"
+        }
+        $entry.Status = 'Pending'
+        [void]$migrateRows.Add($entry)
     }
     else {
-        [void]$skipRows.Add([PSCustomObject]@{
-            RowNo        = $row.No
-            Collection   = $collection
-            Project      = $project
-            Repo         = $repoName
-            Folder       = $folderName
-            RepoType     = $reposType
-            RepoOrFolder = $repoOrFolder
-            Recommendation = $recommendation
-            Action       = 'Skip'
-            Reason       = "Unrecognized recommendation: $recommendation"
-            Status       = 'Skipped'
-            Error        = ''
-        })
+        $entry.Action = 'Skip'
+        $entry.Reason = if ($recommendation) { "Recommendation '$recommendation' not recognized" } else { 'No recommendation specified' }
+        $entry.Status = 'Skipped'
+        [void]$skipRows.Add($entry)
     }
 }
 
-# ─── Summary ───────────────────────────────────────────────────────────────────
+# ─── Show the Preview ─────────────────────────────────────────────────────────
 
-Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  Excel Migration Plan Summary" -ForegroundColor Cyan
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Total rows:          $($excelData.Count)" -ForegroundColor White
-Write-Host "  To migrate:          $($migrateRows.Count)" -ForegroundColor Green
 $repoMigrations = @($migrateRows | Where-Object { $_.Action -eq 'MigrateRepo' })
 $folderSpinouts = @($migrateRows | Where-Object { $_.Action -eq 'SpinOutFolder' })
-Write-Host "    Full repos:        $($repoMigrations.Count)" -ForegroundColor DarkGray
-Write-Host "    Folder spin-outs:  $($folderSpinouts.Count)" -ForegroundColor DarkGray
-Write-Host "  Archive (skip):      $($archiveRows.Count)" -ForegroundColor Yellow
-Write-Host "  Other skips:         $($skipRows.Count)" -ForegroundColor DarkGray
+$tfvcConversions = @($migrateRows | Where-Object { $_.RepoType -eq 'TFVC' })
+
 Write-Host ""
-Write-Host "  Target: $TargetCollection / $TargetProject" -ForegroundColor White
+Write-Host "  ╔═══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "  ║              Migration Preview                        ║" -ForegroundColor Cyan
+Write-Host "  ╚═══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  The spreadsheet has $($excelData.Count) rows. Here is what will happen:" -ForegroundColor White
+Write-Host ""
+Write-Host "    ● $($migrateRows.Count) repositories will be migrated" -ForegroundColor Green
+if ($repoMigrations.Count -gt 0) {
+    Write-Host "        ├─ $($repoMigrations.Count) full repo migration(s)" -ForegroundColor DarkGray
+}
+if ($folderSpinouts.Count -gt 0) {
+    Write-Host "        └─ $($folderSpinouts.Count) folder(s) will be extracted into standalone repos" -ForegroundColor DarkGray
+}
+if ($tfvcConversions.Count -gt 0) {
+    Write-Host "        ($($tfvcConversions.Count) of these need to be converted from TFVC to Git format)" -ForegroundColor DarkGray
+}
+Write-Host "    ● $($archiveRows.Count) repositories are marked for archive (will be skipped)" -ForegroundColor Yellow
+Write-Host "    ● $($skipRows.Count) rows will be skipped (system folders, missing data, etc.)" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "    Destination: $TargetCollection / $TargetProject" -ForegroundColor White
 Write-Host ""
 
-if ($DryRun) {
-    Write-Host "═══════════════════════ DRY RUN ═══════════════════════" -ForegroundColor Yellow
+# Show data warnings
+if ($dataWarnings.Count -gt 0) {
+    Write-Host "  ┌─ Warnings Found ──────────────────────────────────────┐" -ForegroundColor Yellow
+    foreach ($w in $dataWarnings | Select-Object -First 10) {
+        Write-Host "  │  ⚠ $w" -ForegroundColor Yellow
+    }
+    if ($dataWarnings.Count -gt 10) {
+        Write-Host "  │  ... and $($dataWarnings.Count - 10) more warnings" -ForegroundColor Yellow
+    }
+    Write-Host "  └───────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Show detailed preview by collection
+$migrateByCollection = $migrateRows | Group-Object -Property Collection
+
+Write-Host "  ── What will be migrated ─────────────────────────────" -ForegroundColor DarkGray
+Write-Host ""
+
+foreach ($grp in $migrateByCollection) {
+    Write-Host "  Collection: $($grp.Name)" -ForegroundColor White
+    foreach ($item in $grp.Group) {
+        if ($item.Action -eq 'MigrateRepo') {
+            $typeNote = if ($item.RepoType -eq 'TFVC') { ' [convert to Git]' } else { '' }
+            Write-Host "    → Migrate repo: $($item.Project)/$($item.Repo)$typeNote" -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "    → Extract folder: $($item.Project)/$($item.Repo)/$($item.Folder) → new repo" -ForegroundColor DarkGray
+        }
+    }
+    Write-Host ""
+}
+
+if ($archiveRows.Count -gt 0) {
+    Write-Host "  ── What will be skipped (archive) ────────────────────" -ForegroundColor DarkGray
+    Write-Host ""
+    $archiveByCollection = $archiveRows | Group-Object -Property Collection
+    foreach ($grp in ($archiveByCollection | Select-Object -First 5)) {
+        Write-Host "  Collection: $($grp.Name) ($($grp.Count) repos)" -ForegroundColor DarkGray
+    }
+    if ($archiveByCollection.Count -gt 5) {
+        Write-Host "  ... and $($archiveByCollection.Count - 5) more collections" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+}
+
+# Always save the preview manifest
+$allPreviewActions = [System.Collections.ArrayList]::new()
+foreach ($r in $migrateRows) { [void]$allPreviewActions.Add($r) }
+foreach ($r in $archiveRows) { [void]$allPreviewActions.Add($r) }
+foreach ($r in $skipRows) { [void]$allPreviewActions.Add($r) }
+
+$previewManifestPath = Join-Path $config.outputDirectory "excel-migration-PREVIEW-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
+$allPreviewActions | Export-Csv -Path $previewManifestPath -NoTypeInformation -Encoding utf8
+Write-MigrationLog -Message "Preview manifest written to: $previewManifestPath" -LogFile $logFile -Level SUCCESS
+
+Write-Host "  A detailed preview has been saved to:" -ForegroundColor DarkGray
+Write-Host "  $previewManifestPath" -ForegroundColor White
+Write-Host "  (You can open this CSV in Excel to review all $($excelData.Count) rows)" -ForegroundColor DarkGray
+Write-Host ""
+
+# ─── Step 4: Confirm and Execute ──────────────────────────────────────────────
+
+if ($Interactive) {
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  Step 4 of 4: Confirm and run" -ForegroundColor Cyan
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
     Write-Host ""
 
-    if ($repoMigrations.Count -gt 0) {
-        Write-Host "  Repos to migrate:" -ForegroundColor White
-        foreach ($r in $repoMigrations) {
-            $convertNote = if ($r.RepoType -eq 'TFVC') { ' (TFVC→Git)' } else { '' }
-            Write-Host "    $($r.Collection)/$($r.Project)/$($r.Repo)$convertNote → $TargetCollection/$TargetProject" -ForegroundColor DarkGray
-        }
+    if ($migrateRows.Count -eq 0) {
+        Write-Host "  There are no repositories to migrate." -ForegroundColor Yellow
+        Write-Host "  All rows are either marked for archive or were skipped." -ForegroundColor DarkGray
         Write-Host ""
+        return
     }
 
+    Write-Host "  ┌──────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "  │                                                          │" -ForegroundColor Yellow
+    Write-Host "  │  Ready to migrate $($migrateRows.Count.ToString().PadRight(4)) repositories.                    │" -ForegroundColor Yellow
+    Write-Host "  │                                                          │" -ForegroundColor Yellow
+    Write-Host "  │  This will:                                              │" -ForegroundColor Yellow
+    if ($tfvcConversions.Count -gt 0) {
+        Write-Host "  │    • Convert $($tfvcConversions.Count.ToString().PadRight(4)) repos from TFVC to Git format     │" -ForegroundColor Yellow
+    }
     if ($folderSpinouts.Count -gt 0) {
-        Write-Host "  Folders to spin out:" -ForegroundColor White
-        foreach ($r in $folderSpinouts) {
-            Write-Host "    $($r.Collection)/$($r.Project)/$($r.Repo)/$($r.Folder) → new repo '$($r.Folder)' in $TargetCollection/$TargetProject" -ForegroundColor DarkGray
-        }
-        Write-Host ""
+        Write-Host "  │    • Extract $($folderSpinouts.Count.ToString().PadRight(4)) folders into standalone repos      │" -ForegroundColor Yellow
     }
-
-    if ($archiveRows.Count -gt 0) {
-        Write-Host "  Repos marked for archive (will be skipped):" -ForegroundColor Yellow
-        foreach ($r in $archiveRows | Select-Object -First 20) {
-            Write-Host "    $($r.Collection)/$($r.Project)/$($r.Repo) — $($r.Recommendation)" -ForegroundColor DarkGray
-        }
-        if ($archiveRows.Count -gt 20) {
-            Write-Host "    ... and $($archiveRows.Count - 20) more" -ForegroundColor DarkGray
-        }
-        Write-Host ""
-    }
-
-    Write-Host "═══════════════════ END DRY RUN ═══════════════════════" -ForegroundColor Yellow
-    Write-Host "  Re-run without -DryRun to execute." -ForegroundColor Cyan
+    Write-Host "  │    • Move them to: $($TargetCollection)/$($TargetProject)".PadRight(37) + "│" -ForegroundColor Yellow
+    Write-Host "  │                                                          │" -ForegroundColor Yellow
+    Write-Host "  │  This may take a while for large repositories.           │" -ForegroundColor Yellow
+    Write-Host "  │                                                          │" -ForegroundColor Yellow
+    Write-Host "  └──────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
     Write-Host ""
+    Write-Host "  Do you want to proceed? Type 'yes' to confirm: " -ForegroundColor Yellow -NoNewline
+    $confirm = Read-Host
 
-    # Still produce the manifest for dry run
-    $allActions = [System.Collections.ArrayList]::new()
-    foreach ($r in $migrateRows) { [void]$allActions.Add($r) }
-    foreach ($r in $archiveRows) { [void]$allActions.Add($r) }
-    foreach ($r in $skipRows) { [void]$allActions.Add($r) }
+    if ($confirm.Trim().ToLower() -ne 'yes') {
+        Write-Host ""
+        Write-Host "  Migration cancelled. No changes were made." -ForegroundColor Yellow
+        Write-Host "  The preview file is still available at: $previewManifestPath" -ForegroundColor DarkGray
+        Write-Host ""
+        return
+    }
 
-    $manifestPath = Join-Path $config.outputDirectory "excel-migration-manifest-DRYRUN-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
-    $allActions | Export-Csv -Path $manifestPath -NoTypeInformation -Encoding utf8
-    Write-MigrationLog -Message "Dry-run manifest written to: $manifestPath" -LogFile $logFile -Level SUCCESS
-    Write-Host "  Manifest: $manifestPath" -ForegroundColor White
+    Write-Host ""
+}
+elseif ($migrateRows.Count -eq 0) {
+    Write-Host "  No repositories to migrate. All rows are archived or skipped." -ForegroundColor Yellow
     return
 }
 
 # ─── Execute Migrations ───────────────────────────────────────────────────────
 
-Write-Host "  Starting migration of $($migrateRows.Count) items..." -ForegroundColor Cyan
+Write-Host "  ╔═══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "  ║              Migration In Progress                    ║" -ForegroundColor Cyan
+Write-Host "  ╚═══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
 $startTime = Get-Date
 $processedCount = 0
+$successCount = 0
+$failCount = 0
 
 # Group migrations by Collection/Project/Repo to batch operations on same repo
 $grouped = $migrateRows | Group-Object -Property { "$($_.Collection)|$($_.Project)|$($_.Repo)" }
@@ -357,11 +444,16 @@ foreach ($group in $grouped) {
 
     $pat = $config.collections[$sourceCollection]?.pat
     if (-not $pat) {
-        Write-MigrationLog -Message "Collection '$sourceCollection' not found in config — skipping group" -LogFile $logFile -Level WARN
+        $friendlyMsg = "The collection '$sourceCollection' is not in your configuration file. " +
+            "Add it using the Setup Wizard (option 1 on the main menu)."
+        Write-MigrationLog -Message "Collection '$sourceCollection' not found in config" -LogFile $logFile -Level WARN
         foreach ($item in $group.Group) {
             $item.Status = 'Failed'
-            $item.Error = "Collection '$sourceCollection' not in config"
+            $item.Error = $friendlyMsg
+            $failCount++
         }
+        $processedCount += $group.Group.Count
+        Write-Host "  ⚠ Skipping $($group.Group.Count) item(s) in '$sourceCollection' — collection not in config" -ForegroundColor Yellow
         continue
     }
 
@@ -372,13 +464,16 @@ foreach ($group in $grouped) {
     # ── Full Repo Migration ──
     foreach ($item in $repoItems) {
         $processedCount++
-        Write-Host "  [$processedCount/$($migrateRows.Count)] Migrating repo: $sourceCollection/$sourceProject/$sourceRepo" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  Working on $processedCount of $($migrateRows.Count)..." -ForegroundColor Cyan
+        Write-Host "    Migrating repo: $sourceCollection / $sourceProject / $sourceRepo" -ForegroundColor White
 
         try {
             $needsConversion = $item.RepoType -eq 'TFVC'
             $outputName = $sourceRepo -replace '[^a-zA-Z0-9_-]', '-'
 
             if ($needsConversion) {
+                Write-Host "    Converting from TFVC to Git format..." -ForegroundColor DarkGray
                 Write-MigrationLog -Message "Converting TFVC repo '$sourceRepo' to Git" -LogFile $logFile -Level INFO
 
                 & "$PSScriptRoot/Convert-TfvcToGit.ps1" `
@@ -389,7 +484,7 @@ foreach ($group in $grouped) {
                     -OutputRepoName $outputName
             }
 
-            # Move to target collection
+            Write-Host "    Moving to $TargetCollection / $TargetProject..." -ForegroundColor DarkGray
             Write-MigrationLog -Message "Moving '$sourceRepo' to $TargetCollection/$TargetProject" -LogFile $logFile -Level INFO
 
             & "$PSScriptRoot/Move-RepoToCollection.ps1" `
@@ -402,58 +497,66 @@ foreach ($group in $grouped) {
                 -TargetRepoName $outputName
 
             $item.Status = 'Success'
+            $successCount++
+            Write-Host "    ✓ Done" -ForegroundColor Green
             Write-MigrationLog -Message "Successfully migrated '$sourceRepo'" -LogFile $logFile -Level SUCCESS
         }
         catch {
             $item.Status = 'Failed'
-            $item.Error = $_.Exception.Message
+            $item.Error = Get-FriendlyError -ErrorMessage $_.Exception.Message
+            $failCount++
+            Write-Host "    ✗ Failed: $($item.Error)" -ForegroundColor Red
             Write-MigrationLog -Message "Failed to migrate '$sourceRepo': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
         }
     }
 
     # ── Folder Spin-Outs ──
     if ($folderItems.Count -gt 0) {
-        # First convert the parent repo if it's TFVC
-        $parentConverted = $false
         $parentRepoType = $folderItems[0].RepoType
 
         if ($parentRepoType -eq 'TFVC') {
-            try {
-                $parentOutputName = $sourceRepo -replace '[^a-zA-Z0-9_-]', '-'
+            $parentOutputName = $sourceRepo -replace '[^a-zA-Z0-9_-]', '-'
+            $parentRepoPath = Join-Path $config.outputDirectory $parentOutputName
 
-                # Check if we already converted this repo in the full-repo step
-                $parentRepoPath = Join-Path $config.outputDirectory $parentOutputName
-                if (-not (Test-Path $parentRepoPath)) {
-                    Write-MigrationLog -Message "Converting parent TFVC repo '$sourceRepo' to Git for folder extraction" -LogFile $logFile -Level INFO
+            if (-not (Test-Path $parentRepoPath)) {
+                Write-Host ""
+                Write-Host "    Converting parent repo '$sourceRepo' to Git (needed for folder extraction)..." -ForegroundColor DarkGray
 
+                try {
                     & "$PSScriptRoot/Convert-TfvcToGit.ps1" `
                         -ConfigPath $ConfigPath `
                         -Collection $sourceCollection `
                         -ProjectName $sourceProject `
                         -TfvcPath "`$/$sourceProject" `
                         -OutputRepoName $parentOutputName
+
+                    Write-Host "    ✓ Parent repo converted" -ForegroundColor Green
                 }
-                $parentConverted = $true
-            }
-            catch {
-                Write-MigrationLog -Message "Failed to convert parent repo '$sourceRepo': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
-                foreach ($fi in $folderItems) {
-                    $fi.Status = 'Failed'
-                    $fi.Error = "Parent repo conversion failed: $($_.Exception.Message)"
+                catch {
+                    $friendlyMsg = Get-FriendlyError -ErrorMessage $_.Exception.Message
+                    Write-Host "    ✗ Could not convert parent repo: $friendlyMsg" -ForegroundColor Red
+                    Write-MigrationLog -Message "Failed to convert parent repo '$sourceRepo': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
+                    foreach ($fi in $folderItems) {
+                        $fi.Status = 'Failed'
+                        $fi.Error = "Could not convert the parent repo '$sourceRepo' — $friendlyMsg"
+                        $failCount++
+                    }
+                    $processedCount += $folderItems.Count
+                    continue
                 }
-                continue
             }
         }
 
         foreach ($item in $folderItems) {
             $processedCount++
             $folderName = $item.Folder
-            Write-Host "  [$processedCount/$($migrateRows.Count)] Spinning out folder: $sourceCollection/$sourceProject/$sourceRepo/$folderName" -ForegroundColor White
+            Write-Host ""
+            Write-Host "  Working on $processedCount of $($migrateRows.Count)..." -ForegroundColor Cyan
+            Write-Host "    Extracting folder: $sourceRepo / $folderName → new standalone repo" -ForegroundColor White
 
             try {
                 $folderOutputName = $folderName -replace '[^a-zA-Z0-9_-]', '-'
 
-                # Use Split-TfvcToGitRepos to extract the folder
                 $mappings = @{
                     "`$/$sourceProject/$folderName" = $folderOutputName
                 }
@@ -465,8 +568,7 @@ foreach ($group in $grouped) {
                     -TfvcPath "`$/$sourceProject" `
                     -FolderMappings $mappings
 
-                # Move to target collection
-                Write-MigrationLog -Message "Moving spun-out repo '$folderOutputName' to $TargetCollection/$TargetProject" -LogFile $logFile -Level INFO
+                Write-Host "    Moving to $TargetCollection / $TargetProject..." -ForegroundColor DarkGray
 
                 & "$PSScriptRoot/Move-RepoToCollection.ps1" `
                     -ConfigPath $ConfigPath `
@@ -478,22 +580,26 @@ foreach ($group in $grouped) {
                     -TargetRepoName $folderOutputName
 
                 $item.Status = 'Success'
-                Write-MigrationLog -Message "Successfully spun out '$folderName' as '$folderOutputName'" -LogFile $logFile -Level SUCCESS
+                $successCount++
+                Write-Host "    ✓ Done" -ForegroundColor Green
+                Write-MigrationLog -Message "Successfully extracted '$folderName' as '$folderOutputName'" -LogFile $logFile -Level SUCCESS
             }
             catch {
                 $item.Status = 'Failed'
-                $item.Error = $_.Exception.Message
-                Write-MigrationLog -Message "Failed to spin out '$folderName': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
+                $item.Error = Get-FriendlyError -ErrorMessage $_.Exception.Message
+                $failCount++
+                Write-Host "    ✗ Failed: $($item.Error)" -ForegroundColor Red
+                Write-MigrationLog -Message "Failed to extract '$folderName': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
             }
         }
     }
 }
 
-# ─── Comprehensive Manifest ──────────────────────────────────────────────────
+# ─── Final Report ─────────────────────────────────────────────────────────────
 
 $totalDuration = (Get-Date) - $startTime
 
-# Combine all rows into one manifest
+# Build comprehensive manifest
 $allActions = [System.Collections.ArrayList]::new()
 foreach ($r in $migrateRows) {
     $r | Add-Member -NotePropertyName Destination -NotePropertyValue "$TargetCollection/$TargetProject" -Force
@@ -502,7 +608,7 @@ foreach ($r in $migrateRows) {
     [void]$allActions.Add($r)
 }
 foreach ($r in $archiveRows) {
-    $r | Add-Member -NotePropertyName Destination -NotePropertyValue 'N/A (Archived)' -Force
+    $r | Add-Member -NotePropertyName Destination -NotePropertyValue 'N/A (Archived — not migrated)' -Force
     $r | Add-Member -NotePropertyName ConvertedToGit -NotePropertyValue $false -Force
     $r | Add-Member -NotePropertyName SpunOut -NotePropertyValue $false -Force
     [void]$allActions.Add($r)
@@ -514,43 +620,11 @@ foreach ($r in $skipRows) {
     [void]$allActions.Add($r)
 }
 
-# Output summary
-$successCount = @($migrateRows | Where-Object { $_.Status -eq 'Success' }).Count
-$failCount = @($migrateRows | Where-Object { $_.Status -eq 'Failed' }).Count
-$pendingCount = @($migrateRows | Where-Object { $_.Status -eq 'Pending' }).Count
-
-Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  Migration Complete" -ForegroundColor Cyan
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Duration:        $($totalDuration.ToString('hh\:mm\:ss'))" -ForegroundColor White
-Write-Host "  Total processed: $($migrateRows.Count)" -ForegroundColor White
-Write-Host "  Successful:      $successCount" -ForegroundColor Green
-if ($failCount -gt 0) {
-    Write-Host "  Failed:          $failCount" -ForegroundColor Red
-}
-Write-Host "  Archived (skip): $($archiveRows.Count)" -ForegroundColor Yellow
-Write-Host "  Other skips:     $($skipRows.Count)" -ForegroundColor DarkGray
-Write-Host ""
-
-# Show failures
-if ($failCount -gt 0) {
-    Write-Host "  Failed items:" -ForegroundColor Red
-    foreach ($f in ($migrateRows | Where-Object { $_.Status -eq 'Failed' })) {
-        Write-Host "    $($f.Collection)/$($f.Project)/$($f.Repo)$(if($f.Folder){"/$($f.Folder)"}): $($f.Error)" -ForegroundColor Red
-    }
-    Write-Host ""
-}
-
 # Write CSV manifest
 $manifestPath = Join-Path $config.outputDirectory "excel-migration-manifest-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
 $allActions | Select-Object RowNo, Collection, Project, Repo, Folder, RepoType, RepoOrFolder, `
     Recommendation, Action, Reason, Status, Error, Destination, ConvertedToGit, SpunOut |
     Export-Csv -Path $manifestPath -NoTypeInformation -Encoding utf8
-
-Write-MigrationLog -Message "Migration manifest written to: $manifestPath" -LogFile $logFile -Level SUCCESS
-Write-Host "  Manifest: $manifestPath" -ForegroundColor White
 
 # Write JSON report
 $reportPath = Join-Path $config.outputDirectory "excel-migration-report-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
@@ -569,8 +643,48 @@ $report = @{
     failCount     = $failCount
 }
 $report | ConvertTo-Json -Depth 5 | Out-File $reportPath -Encoding utf8
-Write-MigrationLog -Message "Report saved: $reportPath" -LogFile $logFile -Level INFO
 
-Write-Host "  Report:   $reportPath" -ForegroundColor White
-Write-Host "  Log:      $logFile" -ForegroundColor DarkGray
+Write-MigrationLog -Message "Migration manifest: $manifestPath" -LogFile $logFile -Level SUCCESS
+Write-MigrationLog -Message "Report: $reportPath" -LogFile $logFile -Level INFO
+
+# Display results
+Write-Host ""
+Write-Host ""
+Write-Host "  ╔═══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "  ║              Migration Complete                       ║" -ForegroundColor Cyan
+Write-Host "  ╚═══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Time elapsed:  $($totalDuration.ToString('hh\:mm\:ss'))" -ForegroundColor White
+Write-Host ""
+Write-Host "  Results:" -ForegroundColor White
+Write-Host "    ✓ Successful:    $successCount" -ForegroundColor Green
+if ($failCount -gt 0) {
+    Write-Host "    ✗ Failed:        $failCount" -ForegroundColor Red
+}
+Write-Host "    ○ Archived:      $($archiveRows.Count) (not migrated)" -ForegroundColor Yellow
+Write-Host "    ○ Skipped:       $($skipRows.Count)" -ForegroundColor DarkGray
+Write-Host ""
+
+if ($failCount -gt 0) {
+    Write-Host "  ┌─ Items that failed ───────────────────────────────────┐" -ForegroundColor Red
+    foreach ($f in ($migrateRows | Where-Object { $_.Status -eq 'Failed' }) | Select-Object -First 15) {
+        $label = "$($f.Collection)/$($f.Project)/$($f.Repo)"
+        if ($f.Folder) { $label += "/$($f.Folder)" }
+        Write-Host "  │  ✗ $label" -ForegroundColor Red
+        Write-Host "  │    $($f.Error)" -ForegroundColor DarkGray
+    }
+    if ($failCount -gt 15) {
+        Write-Host "  │  ... and $($failCount - 15) more (see manifest for full list)" -ForegroundColor Red
+    }
+    Write-Host "  └───────────────────────────────────────────────────────┘" -ForegroundColor Red
+    Write-Host ""
+}
+
+Write-Host "  Output files:" -ForegroundColor White
+Write-Host "    Manifest (CSV):  $manifestPath" -ForegroundColor DarkGray
+Write-Host "    Report (JSON):   $reportPath" -ForegroundColor DarkGray
+Write-Host "    Log file:        $logFile" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  The manifest CSV can be opened in Excel for a complete" -ForegroundColor DarkGray
+Write-Host "  record of every repository and what happened to it." -ForegroundColor DarkGray
 Write-Host ""

@@ -226,6 +226,7 @@ foreach ($row in $excelData) {
         RepoOrFolder   = $repoOrFolder
         Recommendation = $recommendation
         Action         = ''
+        NewRepoName    = ''
         Reason         = ''
         Status         = ''
         Error          = ''
@@ -264,10 +265,12 @@ foreach ($row in $excelData) {
     elseif ($recommendation -match '(?i)^migrate') {
         if ($repoOrFolder -eq 'Folder') {
             $entry.Action = 'SpinOutFolder'
-            $entry.Reason = "Extract folder '$folderName' from repo '$repoName' into its own Git repo"
+            $entry.NewRepoName = "$($repoName)_$($folderName)" -replace '[^a-zA-Z0-9_-]', '-'
+            $entry.Reason = "Extract folder '$folderName' from repo '$repoName' → new repo '$($entry.NewRepoName)'"
         }
         else {
             $entry.Action = 'MigrateRepo'
+            $entry.NewRepoName = $repoName -replace '[^a-zA-Z0-9_-]', '-'
             $entry.Reason = "Migrate entire repo '$repoName' to Git"
         }
         $entry.Status = 'Pending'
@@ -280,7 +283,26 @@ foreach ($row in $excelData) {
         [void]$skipRows.Add($entry)
     }
 }
+# ─── Resolve Duplicate Repo Names ─────────────────────────────────────────
 
+$nameCount = @{}
+foreach ($item in $migrateRows) {
+    $name = $item.NewRepoName
+    if (-not $nameCount.ContainsKey($name)) {
+        $nameCount[$name] = [System.Collections.ArrayList]::new()
+    }
+    [void]$nameCount[$name].Add($item)
+}
+
+foreach ($kvp in $nameCount.GetEnumerator()) {
+    if ($kvp.Value.Count -gt 1) {
+        # First occurrence keeps the base name, subsequent ones get _1, _2, etc.
+        for ($i = 1; $i -lt $kvp.Value.Count; $i++) {
+            $kvp.Value[$i].NewRepoName = "$($kvp.Key)_$i"
+            $kvp.Value[$i].Reason = $kvp.Value[$i].Reason -replace [regex]::Escape($kvp.Key), $kvp.Value[$i].NewRepoName
+        }
+    }
+}
 # ─── Show the Preview ─────────────────────────────────────────────────────────
 
 $repoMigrations = @($migrateRows | Where-Object { $_.Action -eq 'MigrateRepo' })
@@ -337,7 +359,7 @@ foreach ($grp in $migrateByCollection) {
             Write-Host "    → Migrate repo: $($item.Project)/$($item.Repo)$typeNote" -ForegroundColor DarkGray
         }
         else {
-            Write-Host "    → Extract folder: $($item.Project)/$($item.Repo)/$($item.Folder) → new repo" -ForegroundColor DarkGray
+            Write-Host "    → Extract folder: $($item.Project)/$($item.Repo)/$($item.Folder) → new repo '$($item.NewRepoName)'" -ForegroundColor DarkGray
         }
     }
     Write-Host ""
@@ -552,10 +574,10 @@ foreach ($group in $grouped) {
             $folderName = $item.Folder
             Write-Host ""
             Write-Host "  Working on $processedCount of $($migrateRows.Count)..." -ForegroundColor Cyan
-            Write-Host "    Extracting folder: $sourceRepo / $folderName → new standalone repo" -ForegroundColor White
+            Write-Host "    Extracting folder: $sourceRepo / $folderName → new repo '$($item.NewRepoName)'" -ForegroundColor White
 
             try {
-                $folderOutputName = $folderName -replace '[^a-zA-Z0-9_-]', '-'
+                $folderOutputName = $item.NewRepoName
 
                 $mappings = @{
                     "`$/$sourceProject/$folderName" = $folderOutputName
@@ -622,7 +644,7 @@ foreach ($r in $skipRows) {
 
 # Write CSV manifest
 $manifestPath = Join-Path $config.outputDirectory "excel-migration-manifest-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
-$allActions | Select-Object RowNo, Collection, Project, Repo, Folder, RepoType, RepoOrFolder, `
+$allActions | Select-Object RowNo, Collection, Project, Repo, Folder, NewRepoName, RepoType, RepoOrFolder, `
     Recommendation, Action, Reason, Status, Error, Destination, ConvertedToGit, SpunOut |
     Export-Csv -Path $manifestPath -NoTypeInformation -Encoding utf8
 

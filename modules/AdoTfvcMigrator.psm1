@@ -322,7 +322,19 @@ function Invoke-GitTfs {
     }
 
     if ($process.ExitCode -ne 0) {
-        throw "git-tfs failed (exit $($process.ExitCode)): $stderr"
+        # Combine stderr and last lines of stdout to surface the actual error
+        $detail = ''
+        if ($stderr.Trim()) {
+            $detail = $stderr.Trim()
+        }
+        # git-tfs often writes errors to stdout — grab the last few lines
+        $stdoutLines = $stdout -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 10
+        if ($stdoutLines) {
+            $stdoutTail = ($stdoutLines -join "`n").Trim()
+            if ($detail) { $detail += "`n" + $stdoutTail } else { $detail = $stdoutTail }
+        }
+        if (-not $detail) { $detail = '(no output captured — check the log file)' }
+        throw "git-tfs failed (exit $($process.ExitCode)):`n$detail"
     }
 
     return $stdout

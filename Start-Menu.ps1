@@ -60,6 +60,8 @@ function Show-ConfigStatus {
 function Pause-ForUser {
     Write-Host ""
     Write-Host "  Press Enter to return to the main menu..." -ForegroundColor DarkGray -NoNewline
+    # Flush any buffered input so the user doesn't skip past this prompt
+    while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
     Read-Host
 }
 
@@ -100,9 +102,11 @@ while ($true) {
     Write-Host ""
     Write-Host "  ── Batch ──────────────────────────────────────────────" -ForegroundColor DarkGray
     Write-Host "  [8]  Run Migration Plan    Execute a batch migration plan" -ForegroundColor White
+    Write-Host "  [9]  Excel Migration       Migrate repos using MDR Excel file" -ForegroundColor White
+    Write-Host "  [10] Archive Repos         Archive repos using Dalptfs01 Excel file" -ForegroundColor White
     Write-Host ""
     Write-Host "  ── Other ──────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [9]  View Logs             Open the logs directory" -ForegroundColor White
+    Write-Host "  [11] View Logs             Open the logs directory" -ForegroundColor White
     Write-Host "  [0]  Exit" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Select an option: " -ForegroundColor Yellow -NoNewline
@@ -190,6 +194,20 @@ while ($true) {
             Pause-ForUser
         }
         '9' {
+            # Excel-driven migration
+            if (-not (Test-ConfigReady)) { continue }
+            Show-Banner
+            & "$PSScriptRoot/Invoke-ExcelMigration.ps1" -ConfigPath $ConfigPath -Interactive
+            Pause-ForUser
+        }
+        '10' {
+            # Archive repos
+            if (-not (Test-ConfigReady)) { continue }
+            Show-Banner
+            & "$PSScriptRoot/Invoke-ArchiveRepos.ps1" -ConfigPath $ConfigPath -Interactive
+            Pause-ForUser
+        }
+        '11' {
             # View logs
             $logDir = './logs'
             if (Test-Path $ConfigPath) {
@@ -239,7 +257,7 @@ while ($true) {
             return
         }
         default {
-            Write-Host "  Invalid option. Please enter a number 0-9." -ForegroundColor Red
+            Write-Host "  Invalid option. Please enter a number 0-11." -ForegroundColor Red
             Start-Sleep -Seconds 1
         }
     }

@@ -201,7 +201,19 @@ foreach ($collectionName in $targetCollections) {
         }
 
         # Get folders at the requested depth
-        $folders = $rootItems | Where-Object { $_.isFolder -eq $true -and $_.path -ne "`$/$projectName" }
+        $folders = $rootItems | Where-Object {
+            $_.isFolder -eq $true -and
+            $_.path -ne "`$/$projectName" -and
+            $_.path -notlike '*/BuildProcessTemplates'
+        }
+
+        # Fetch build definitions for this project to check pipeline associations
+        $buildDefs = @()
+        try {
+            $buildDefs = @(Get-AdoBuildDefinitions -ServerUrl $config.adoServerUrl `
+                -Collection $collectionName -Pat $pat -ProjectName $projectName)
+        }
+        catch { }
 
         foreach ($folder in $folders) {
             $folderPath = $folder.path
@@ -235,6 +247,26 @@ foreach ($collectionName in $targetCollections) {
                 catch { }
             }
 
+            # Check if any pipeline/build definition references this folder path
+            $hasPipeline = $false
+            foreach ($bd in $buildDefs) {
+                $repoPath = $bd.repository.defaultBranch ?? $bd.repository.rootFolder ?? ''
+                if ($repoPath -like "*$($folder.path)*" -or $repoPath -like "*$projectName*") {
+                    $hasPipeline = $true
+                    break
+                }
+            }
+            # Also check by name match (build def name often matches folder name)
+            if (-not $hasPipeline) {
+                $folderName = ($folderPath -split '/')[-1]
+                foreach ($bd in $buildDefs) {
+                    if ($bd.name -like "*$folderName*" -or ($bd.repository.name -and $bd.repository.name -eq $folderName)) {
+                        $hasPipeline = $true
+                        break
+                    }
+                }
+            }
+
             $entry = [PSCustomObject]@{
                 Collection     = $collectionName
                 Project        = $projectName
@@ -242,6 +274,7 @@ foreach ($collectionName in $targetCollections) {
                 SubFolders     = $subItemCount
                 LastChangeDate = $lastDate
                 LastAuthor     = $lastAuthor
+                HasPipeline    = $hasPipeline
             }
 
             [void]$allResults.Add($entry)

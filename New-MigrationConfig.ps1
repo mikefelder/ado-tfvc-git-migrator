@@ -238,6 +238,34 @@ $config.outputDirectory = Read-WithDefault -Prompt 'Output directory (where conv
 $config.logDirectory = Read-WithDefault -Prompt 'Log directory' -Default $config.logDirectory
 $config.defaultBranch = Read-WithDefault -Prompt 'Default Git branch name' -Default $config.defaultBranch
 
+# git-tfs path (if not in PATH)
+$gitTfsInPath = $null -ne (Get-Command 'git-tfs' -ErrorAction SilentlyContinue)
+if (-not $gitTfsInPath) {
+    try { $gitTfsInPath = $null -ne (& git tfs --version 2>$null) } catch { }
+}
+
+if ($gitTfsInPath) {
+    Write-Host ""
+    Write-Host "  git-tfs: found in PATH ✓" -ForegroundColor Green
+}
+else {
+    Write-Host ""
+    Write-Host "  git-tfs was NOT found in your PATH." -ForegroundColor Yellow
+    Write-Host "  If you've downloaded git-tfs manually, paste the full path to git-tfs.exe" -ForegroundColor DarkGray
+    Write-Host "  (e.g. E:\Tools\GitTfs\git-tfs.exe)" -ForegroundColor DarkGray
+    $currentGitTfs = $config.gitTfsPath
+    $gitTfsInput = Read-WithDefault -Prompt 'Path to git-tfs.exe (or press Enter to skip)' -Default $currentGitTfs
+
+    if ($gitTfsInput -and (Test-Path $gitTfsInput)) {
+        $config.gitTfsPath = $gitTfsInput
+        Write-Host "  ✓ git-tfs path set." -ForegroundColor Green
+    }
+    elseif ($gitTfsInput) {
+        Write-Host "  File not found at that path. You can fix this later in the config." -ForegroundColor Yellow
+        $config.gitTfsPath = $gitTfsInput
+    }
+}
+
 # ─── Save ─────────────────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -254,6 +282,9 @@ else {
 Write-Host "  Output dir:     $($config.outputDirectory)" -ForegroundColor White
 Write-Host "  Log dir:        $($config.logDirectory)" -ForegroundColor White
 Write-Host "  Default branch: $($config.defaultBranch)" -ForegroundColor White
+if ($config.gitTfsPath) {
+    Write-Host "  git-tfs path:   $($config.gitTfsPath)" -ForegroundColor White
+}
 Write-Host ""
 
 Write-Host "  Save this configuration? [Y/n]: " -ForegroundColor Yellow -NoNewline

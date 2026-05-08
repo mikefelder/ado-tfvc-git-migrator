@@ -207,6 +207,34 @@ function Get-TfvcChangesets {
     return $result.value
 }
 
+function Get-AdoBuildDefinitions {
+    <#
+    .SYNOPSIS
+        Gets build/pipeline definitions for a project, optionally filtered by repository path.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerUrl,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$Pat,
+        [Parameter(Mandatory)]
+        [string]$ProjectName
+    )
+
+    $encodedProject = [Uri]::EscapeDataString($ProjectName)
+    $url = "$ServerUrl/$Collection/$encodedProject/_apis/build/definitions"
+    try {
+        $result = Invoke-AdoApi -Url $url -Pat $Pat
+        return $result.value
+    }
+    catch {
+        return @()
+    }
+}
+
 # ─── Git-TFS Helpers ──────────────────────────────────────────────────────────
 
 function Find-GitTfs {

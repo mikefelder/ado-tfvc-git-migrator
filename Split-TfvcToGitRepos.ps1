@@ -303,7 +303,10 @@ if ($authorFile -and (Test-Path $authorFile)) {
     $cloneArgs += " --authors=`"$authorFile`""
 }
 
-$env:GIT_TFS_PAT = $pat
+# Authenticate with PAT
+$env:GIT_TFS_USERNAME = ''
+$env:GIT_TFS_PASSWORD = $pat
+$cloneArgs += " --username=`"`" --password=`"$pat`""
 
 try {
     Invoke-GitTfs -Arguments $cloneArgs -LogFile $logFile
@@ -314,7 +317,8 @@ catch {
     throw
 }
 finally {
-    Remove-Item Env:\GIT_TFS_PAT -ErrorAction SilentlyContinue
+    Remove-Item Env:\GIT_TFS_USERNAME -ErrorAction SilentlyContinue
+    Remove-Item Env:\GIT_TFS_PASSWORD -ErrorAction SilentlyContinue
 }
 
 # Clean git-tfs metadata from staging

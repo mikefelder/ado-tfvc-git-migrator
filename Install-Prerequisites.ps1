@@ -11,8 +11,8 @@
     - git-filter-repo (optional but recommended)
     - Git LFS (optional)
 
-    If a tool is missing, prompts the user to install it automatically
-    (using Chocolatey, winget, or pip where available).
+    If required prerequisites are missing, offers to automatically download
+    and install them, update PATH, and verify the installation.
 
 .EXAMPLE
     ./Install-Prerequisites.ps1
@@ -23,352 +23,545 @@ param()
 
 $ErrorActionPreference = 'Continue'
 
-Write-Host ""
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+$toolsDir = Join-Path $env:LOCALAPPDATA 'ado-tfvc-migrator-tools'
+
+function Add-ToSessionPath {
+    param([string]$Directory)
+    if ($Directory -and (Test-Path $Directory) -and $env:PATH -notlike "*$Directory*") {
+        $env:PATH = "$Directory;$env:PATH"
+    }
+}
+
+function Add-ToUserPath {
+    param([string]$Directory)
+    if (-not (Test-Path $Directory)) { return }
+    $currentPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+    if ($currentPath -notlike "*$Directory*") {
+        [Environment]::SetEnvironmentVariable('PATH', "$Directory;$currentPath", 'User')
+        Write-Host "    Added $Directory to user PATH" -ForegroundColor DarkGray
+    }
+    Add-ToSessionPath $Directory
+}
+
+function Sync-ToolsDirToPath {
+    # Scan toolsDir subdirectories for installed executables and add to session PATH
+    if (-not (Test-Path $toolsDir)) { return }
+    Get-ChildItem -Path $toolsDir -Directory -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+        $hasExe = Get-ChildItem -Path $_.FullName -Filter '*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hasExe) {
+            Add-ToSessionPath $_.FullName
+        }
+    }
+}
+
+function Test-GitTfsAvailable {
+    $cmd = Get-Command 'git-tfs' -ErrorAction SilentlyContinue
+    if ($cmd) { return $true }
+    try {
+        $result = & git tfs --version 2>$null
+        if ($result) { return $true }
+    } catch { }
+    # Fallback: check known install location directly
+    $gitTfsDir = Join-Path $toolsDir 'git-tfs'
+    if (Test-Path $gitTfsDir) {
+        $exe = Get-ChildItem -Path $gitTfsDir -Recurse -Filter 'git-tfs.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($exe) {
+            Add-ToSessionPath $exe.DirectoryName
+            return $true
+        }
+    }
+    return $false
+}
+
+# ─── Check Functions ──────────────────────────────────────────────────────────
+
+function Test-Prereq-Git {
+    $gitCmd = Get-Command 'git' -ErrorAction SilentlyContinue
+    if ($gitCmd) {
+        $gitVersion = (git --version) -replace 'git version ', ''
+        $major, $minor = $gitVersion.Split('.')[0..1] | ForEach-Object { [int]$_ }
+        if ($major -gt 2 -or ($major -eq 2 -and $minor -ge 30)) {
+            return @{ Status = 'OK'; Detail = $gitVersion }
+        }
+        return @{ Status = 'WARN'; Detail = "version $gitVersion, recommend 2.30+" }
+    }
+    return @{ Status = 'FAIL'; Detail = 'not found' }
+}
+
+function Test-Prereq-GitTfs {
+    if (Test-GitTfsAvailable) {
+        try {
+            $version = & git tfs --version 2>$null
+            return @{ Status = 'OK'; Detail = "$version" }
+        } catch {
+            return @{ Status = 'OK'; Detail = 'found' }
+        }
+    }
+    return @{ Status = 'FAIL'; Detail = 'not found' }
+}
+
+function Test-Prereq-GitFilterRepo {
+    $cmd = Get-Command 'git-filter-repo' -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return @{ Status = 'OK'; Detail = 'found' }
+    }
+    return @{ Status = 'MISSING'; Detail = 'optional — requires Python; toolkit falls back to git filter-branch' }
+}
+
+function Test-Prereq-GitLfs {
+    $cmd = Get-Command 'git-lfs' -ErrorAction SilentlyContinue
+    if (-not $cmd) {
+        # Check known install locations
+        $searchPaths = @(
+            "${env:ProgramFiles}\Git\cmd",
+            "${env:ProgramFiles}\Git LFS",
+            (Join-Path $toolsDir 'git-lfs')
+        )
+        foreach ($dir in $searchPaths) {
+            if (Test-Path $dir) {
+                $exe = Get-ChildItem -Path $dir -Recurse -Filter 'git-lfs.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($exe) {
+                    Add-ToSessionPath $exe.DirectoryName
+                    $cmd = Get-Command 'git-lfs' -ErrorAction SilentlyContinue
+                    break
+                }
+            }
+        }
+    }
+    if ($cmd) {
+        $gitCmd = Get-Command 'git' -ErrorAction SilentlyContinue
+        if ($gitCmd) {
+            try {
+                $lfsVersion = (git lfs version) -replace 'git-lfs/', '' -replace ' .*', ''
+                return @{ Status = 'OK'; Detail = $lfsVersion }
+            } catch {
+                return @{ Status = 'OK'; Detail = 'found (git not available for version check)' }
+            }
+        }
+        return @{ Status = 'OK'; Detail = 'found (git not available for version check)' }
+    }
+    return @{ Status = 'MISSING'; Detail = 'optional — needed for binary file tracking' }
+}
+
+# ─── Install Functions ────────────────────────────────────────────────────────
+
+function Install-Prereq-Git {
+    $installed = $false
+
+    # Try winget first
+    $winget = Get-Command 'winget' -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host "  Trying winget..." -ForegroundColor Yellow
+        $proc = Start-Process -FilePath 'winget' -ArgumentList 'install', '--id', 'Git.Git', '-e', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements' -Wait -PassThru -NoNewWindow
+        if ($proc.ExitCode -eq 0) {
+            $installed = $true
+        } elseif ($proc.ExitCode -in @(-1978335189, -1978335191)) {
+            Write-Host "    winget reports already installed" -ForegroundColor DarkGray
+            $installed = $true
+        } else {
+            Write-Host "    winget failed (exit code $($proc.ExitCode)) — will try direct download" -ForegroundColor DarkGray
+        }
+    }
+
+    # Fallback: download installer from GitHub
+    if (-not $installed) {
+        Write-Host "  Downloading Git installer from GitHub..." -ForegroundColor Yellow
+        try {
+            $releaseInfo = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -Headers @{ 'User-Agent' = 'ado-tfvc-migrator' }
+            $asset = $releaseInfo.assets | Where-Object { $_.name -match '64-bit\.exe$' -and $_.name -notmatch 'portable' } | Select-Object -First 1
+            if (-not $asset) {
+                $asset = $releaseInfo.assets | Where-Object { $_.name -match 'Git-.*-64-bit.*\.exe$' } | Select-Object -First 1
+            }
+            if (-not $asset) {
+                Write-Host "  ERROR: Could not find Git installer in release assets" -ForegroundColor Red
+                Write-Host "  Install manually: https://git-scm.com/downloads" -ForegroundColor Yellow
+                return $false
+            }
+
+            $installerPath = Join-Path $env:TEMP $asset.name
+            Write-Host "    Downloading $($asset.name)..." -ForegroundColor DarkGray
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installerPath -UseBasicParsing
+
+            Write-Host "    Running silent install..." -ForegroundColor DarkGray
+            $proc = Start-Process -FilePath $installerPath -ArgumentList '/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-', '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS', '/COMPONENTS=icons,ext\reg\shellhere,assoc,assoc_sh' -Wait -PassThru
+            Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+
+            if ($proc.ExitCode -eq 0) {
+                $installed = $true
+            } else {
+                Write-Host "  ERROR: Git installer exited with code $($proc.ExitCode)" -ForegroundColor Red
+                return $false
+            }
+        }
+        catch {
+            Write-Host "  ERROR: Failed to download/install Git: $_" -ForegroundColor Red
+            Write-Host "  Install manually: https://git-scm.com/downloads" -ForegroundColor Yellow
+            return $false
+        }
+    }
+
+    if ($installed) {
+        # Add default Git install paths to session
+        $gitPaths = @(
+            "${env:ProgramFiles}\Git\cmd",
+            "${env:ProgramFiles(x86)}\Git\cmd"
+        )
+        foreach ($p in $gitPaths) {
+            Add-ToSessionPath $p
+        }
+    }
+    return $installed
+}
+
+function Install-Prereq-GitTfs {
+    Write-Host "  Installing git-tfs from GitHub releases..." -ForegroundColor Yellow
+    $gitTfsDir = Join-Path $toolsDir 'git-tfs'
+    if (-not (Test-Path $gitTfsDir)) {
+        New-Item -ItemType Directory -Path $gitTfsDir -Force | Out-Null
+    }
+
+    try {
+        # Get latest release URL from GitHub API
+        $releaseInfo = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-tfs/git-tfs/releases/latest' -Headers @{ 'User-Agent' = 'ado-tfvc-migrator' }
+        $asset = $releaseInfo.assets | Where-Object { $_.name -like '*x64*' -or $_.name -like '*.zip' } | Select-Object -First 1
+        if (-not $asset) {
+            $asset = $releaseInfo.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
+        }
+        if (-not $asset) {
+            Write-Host "  ERROR: Could not find git-tfs release asset" -ForegroundColor Red
+            return $false
+        }
+
+        $zipPath = Join-Path $env:TEMP "git-tfs-latest.zip"
+        Write-Host "    Downloading $($asset.name)..." -ForegroundColor DarkGray
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+
+        Write-Host "    Extracting to $gitTfsDir..." -ForegroundColor DarkGray
+        Expand-Archive -Path $zipPath -DestinationPath $gitTfsDir -Force
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+
+        # The zip may contain a nested folder — find git-tfs.exe
+        $exePath = Get-ChildItem -Path $gitTfsDir -Recurse -Filter 'git-tfs.exe' | Select-Object -First 1
+        if ($exePath) {
+            $binDir = $exePath.DirectoryName
+        } else {
+            $binDir = $gitTfsDir
+        }
+
+        Add-ToUserPath $binDir
+        return $true
+    }
+    catch {
+        Write-Host "  ERROR: Failed to download/install git-tfs: $_" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Install-Prereq-GitLfs {
+    $installed = $false
+
+    # Try winget first
+    $winget = Get-Command 'winget' -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host "  Trying winget..." -ForegroundColor Yellow
+        $proc = Start-Process -FilePath 'winget' -ArgumentList 'install', '--id', 'GitHub.GitLFS', '-e', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements' -Wait -PassThru -NoNewWindow
+        # 0 = success, -1978335189 = no update (already installed), -1978335191 = already installed
+        if ($proc.ExitCode -eq 0) {
+            $installed = $true
+        } elseif ($proc.ExitCode -in @(-1978335189, -1978335191)) {
+            Write-Host "    winget reports already installed — will try direct download" -ForegroundColor DarkGray
+        } else {
+            Write-Host "    winget failed (exit code $($proc.ExitCode)) — will try direct download" -ForegroundColor DarkGray
+        }
+    }
+
+    # Fallback: download from GitHub releases
+    if (-not $installed) {
+        Write-Host "  Downloading Git LFS from GitHub releases..." -ForegroundColor Yellow
+        try {
+            $releaseInfo = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-lfs/git-lfs/releases/latest' -Headers @{ 'User-Agent' = 'ado-tfvc-migrator' }
+            $asset = $releaseInfo.assets | Where-Object { $_.name -match 'windows-amd64.*\.zip$' } | Select-Object -First 1
+            if (-not $asset) {
+                $asset = $releaseInfo.assets | Where-Object { $_.name -match 'windows.*\.zip$' } | Select-Object -First 1
+            }
+            if (-not $asset) {
+                Write-Host "  ERROR: Could not find Git LFS release asset for Windows" -ForegroundColor Red
+                Write-Host "  Install manually: https://git-lfs.github.com/" -ForegroundColor Yellow
+                return $false
+            }
+
+            $zipPath = Join-Path $env:TEMP "git-lfs-latest.zip"
+            $lfsDir = Join-Path $toolsDir 'git-lfs'
+            Write-Host "    Downloading $($asset.name)..." -ForegroundColor DarkGray
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+
+            if (-not (Test-Path $lfsDir)) {
+                New-Item -ItemType Directory -Path $lfsDir -Force | Out-Null
+            }
+            Write-Host "    Extracting to $lfsDir..." -ForegroundColor DarkGray
+            Expand-Archive -Path $zipPath -DestinationPath $lfsDir -Force
+            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+
+            # Find git-lfs.exe (may be in a nested folder)
+            $exePath = Get-ChildItem -Path $lfsDir -Recurse -Filter 'git-lfs.exe' | Select-Object -First 1
+            if ($exePath) {
+                Add-ToUserPath $exePath.DirectoryName
+                $installed = $true
+            } else {
+                Write-Host "  ERROR: git-lfs.exe not found in downloaded archive" -ForegroundColor Red
+                return $false
+            }
+        }
+        catch {
+            Write-Host "  ERROR: Failed to download Git LFS: $_" -ForegroundColor Red
+            Write-Host "  Install manually: https://git-lfs.github.com/" -ForegroundColor Yellow
+            return $false
+        }
+    }
+
+    if ($installed) {
+        # Add common bundled paths to session
+        foreach ($p in @("${env:ProgramFiles}\Git\cmd", "${env:ProgramFiles}\Git LFS")) {
+            Add-ToSessionPath $p
+        }
+        # Initialize LFS
+        try { & git lfs install 2>$null | Out-Null } catch { }
+    }
+    return $installed
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════════
+
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "  ADO TFVC-to-Git Migrator — Prerequisite Check" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-$allGood = $true
-$missing = [System.Collections.ArrayList]::new()
+# Ensure tools dir is in PATH for this session (picks up previous installs)
+Add-ToSessionPath $toolsDir
+Sync-ToolsDirToPath
 
-# ─── Detect package managers ──────────────────────────────────────────────────
-
-$hasChoco = $null -ne (Get-Command 'choco' -ErrorAction SilentlyContinue)
-$hasWinget = $null -ne (Get-Command 'winget' -ErrorAction SilentlyContinue)
-$hasPip = $null -ne (Get-Command 'pip' -ErrorAction SilentlyContinue)
-if (-not $hasPip) { $hasPip = $null -ne (Get-Command 'pip3' -ErrorAction SilentlyContinue) }
+$missingRequired = @()
+$missingOptional = @()
 
 # ─── PowerShell ────────────────────────────────────────────────────────────────
 
-Write-Host "  Checking PowerShell..." -NoNewline
+Write-Host "Checking PowerShell..." -NoNewline
 $psVersion = $PSVersionTable.PSVersion
 if ($psVersion.Major -ge 7) {
     Write-Host " OK ($psVersion)" -ForegroundColor Green
 }
 else {
     Write-Host " FAIL (need 7+, have $psVersion)" -ForegroundColor Red
-    Write-Host "    Since you're running this script, you likely already have PS7." -ForegroundColor Yellow
-    Write-Host "    Make sure you're running 'pwsh' not 'powershell'." -ForegroundColor Yellow
-    $allGood = $false
+    Write-Host "  Install: https://learn.microsoft.com/powershell/scripting/install/installing-powershell" -ForegroundColor Yellow
+    # PowerShell can't auto-upgrade itself, so just warn
 }
 
 # ─── Git ──────────────────────────────────────────────────────────────────────
 
-Write-Host "  Checking Git..." -NoNewline
-$gitCmd = Get-Command 'git' -ErrorAction SilentlyContinue
-if ($gitCmd) {
-    $gitVersion = (git --version) -replace 'git version ', ''
-    $major, $minor = $gitVersion.Split('.')[0..1] | ForEach-Object { [int]$_ }
-    if ($major -gt 2 -or ($major -eq 2 -and $minor -ge 30)) {
-        Write-Host " OK ($gitVersion)" -ForegroundColor Green
+Write-Host "Checking Git..." -NoNewline
+$gitCheck = Test-Prereq-Git
+switch ($gitCheck.Status) {
+    'OK'   { Write-Host " OK ($($gitCheck.Detail))" -ForegroundColor Green }
+    'WARN' {
+        Write-Host " WARN ($($gitCheck.Detail))" -ForegroundColor Yellow
+        $missingRequired += 'Git'
     }
-    else {
-        Write-Host " WARN (version $gitVersion, recommend 2.30+)" -ForegroundColor Yellow
-        [void]$missing.Add('git')
-        $allGood = $false
+    'FAIL' {
+        Write-Host " FAIL ($($gitCheck.Detail))" -ForegroundColor Red
+        $missingRequired += 'Git'
     }
-}
-else {
-    Write-Host " NOT FOUND" -ForegroundColor Red
-    [void]$missing.Add('git')
-    $allGood = $false
 }
 
 # ─── git-tfs ──────────────────────────────────────────────────────────────────
 
-Write-Host "  Checking git-tfs..." -NoNewline
-$gitTfsFound = $false
-$gitTfs = Get-Command 'git-tfs' -ErrorAction SilentlyContinue
-if ($gitTfs) {
-    $gitTfsFound = $true
-}
-else {
-    try {
-        $result = & git tfs --version 2>$null
-        if ($result) { $gitTfsFound = $true }
+Write-Host "Checking git-tfs..." -NoNewline
+$gitTfsCheck = Test-Prereq-GitTfs
+switch ($gitTfsCheck.Status) {
+    'OK'   { Write-Host " OK ($($gitTfsCheck.Detail))" -ForegroundColor Green }
+    'FAIL' {
+        Write-Host " FAIL ($($gitTfsCheck.Detail))" -ForegroundColor Red
+        $missingRequired += 'git-tfs'
     }
-    catch { }
-}
-
-if ($gitTfsFound) {
-    try {
-        $version = & git tfs --version 2>$null
-        Write-Host " OK ($version)" -ForegroundColor Green
-    }
-    catch {
-        Write-Host " OK (found)" -ForegroundColor Green
-    }
-}
-else {
-    Write-Host " NOT FOUND" -ForegroundColor Red
-    [void]$missing.Add('git-tfs')
-    $allGood = $false
 }
 
 # ─── git-filter-repo ─────────────────────────────────────────────────────────
 
-Write-Host "  Checking git-filter-repo..." -NoNewline
-$filterRepo = Get-Command 'git-filter-repo' -ErrorAction SilentlyContinue
-if ($filterRepo) {
-    Write-Host " OK" -ForegroundColor Green
-}
-else {
-    Write-Host " NOT FOUND (optional — needed for splitting repos)" -ForegroundColor Yellow
-    [void]$missing.Add('git-filter-repo')
+Write-Host "Checking git-filter-repo..." -NoNewline
+$filterRepoCheck = Test-Prereq-GitFilterRepo
+switch ($filterRepoCheck.Status) {
+    'OK'      { Write-Host " OK ($($filterRepoCheck.Detail))" -ForegroundColor Green }
+    'MISSING' {
+        Write-Host " MISSING ($($filterRepoCheck.Detail))" -ForegroundColor Yellow
+
+    }
 }
 
 # ─── Git LFS ─────────────────────────────────────────────────────────────────
 
-Write-Host "  Checking Git LFS..." -NoNewline
-$gitLfs = Get-Command 'git-lfs' -ErrorAction SilentlyContinue
-if ($gitLfs) {
-    $lfsVersion = (git lfs version) -replace 'git-lfs/', '' -replace ' .*', ''
-    Write-Host " OK ($lfsVersion)" -ForegroundColor Green
-}
-else {
-    Write-Host " NOT FOUND (optional — needed for large binary files)" -ForegroundColor Yellow
-    [void]$missing.Add('git-lfs')
-}
-
-# ─── Offer to install missing tools ──────────────────────────────────────────
-
-function Find-OrInstall {
-    <#
-    .SYNOPSIS
-        For a missing tool: check common paths, ask user to locate it, offer to add to PATH, or install via package manager.
-    #>
-    param(
-        [string]$ToolName,
-        [string]$ExeName,
-        [string[]]$CommonPaths,
-        [string]$Required,
-        [scriptblock]$InstallAction
-    )
-
-    $label = if ($Required -eq 'required') { "(required)" } else { "(optional)" }
-    Write-Host "  $ToolName $label" -ForegroundColor White
-
-    # 1. Search common locations
-    $foundPath = $null
-    foreach ($p in $CommonPaths) {
-        $candidate = Join-Path $p $ExeName
-        if (Test-Path $candidate) {
-            $foundPath = $p
-            break
-        }
-    }
-
-    if ($foundPath) {
-        Write-Host "    Found at: $foundPath" -ForegroundColor Green
-        Write-Host "    Add this to your PATH so it's always available? [Y/n]: " -ForegroundColor Yellow -NoNewline
-        $answer = Read-Host
-        if ($answer.Trim() -notmatch '^[Nn]') {
-            Add-ToUserPath -Directory $foundPath
-        }
-        Write-Host ""
-        return
-    }
-
-    # 2. Ask if they already have it downloaded somewhere
-    Write-Host "    Do you already have $ToolName downloaded somewhere on this computer? [y/N]: " -ForegroundColor Yellow -NoNewline
-    $hasIt = Read-Host
-    if ($hasIt.Trim() -match '^[Yy]') {
-        Write-Host "    Paste the folder path where $ExeName is located" -ForegroundColor Yellow
-        Write-Host "    (e.g. E:\Tools\$ToolName): " -ForegroundColor DarkGray -NoNewline
-        $userPath = Read-Host
-
-        if ($userPath -and (Test-Path $userPath)) {
-            $candidate = Join-Path $userPath.Trim() $ExeName
-            if (Test-Path $candidate) {
-                Write-Host "    Found $ExeName in $userPath" -ForegroundColor Green
-                Write-Host "    Add this to your PATH? [Y/n]: " -ForegroundColor Yellow -NoNewline
-                $answer = Read-Host
-                if ($answer.Trim() -notmatch '^[Nn]') {
-                    Add-ToUserPath -Directory $userPath.Trim()
-                }
-                Write-Host ""
-                return
-            }
-            else {
-                Write-Host "    Could not find '$ExeName' in that folder." -ForegroundColor Red
-                # List what's there to help them
-                $exes = Get-ChildItem $userPath.Trim() -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object -First 10
-                if ($exes) {
-                    Write-Host "    Files found there: $($exes.Name -join ', ')" -ForegroundColor DarkGray
-                }
-            }
-        }
-        else {
-            Write-Host "    Folder not found: $userPath" -ForegroundColor Red
-        }
-    }
-
-    # 3. Offer to install via package manager
-    if ($InstallAction) {
-        & $InstallAction
-    }
-    else {
-        Write-Host "    No automatic installer available for $ToolName." -ForegroundColor DarkGray
-    }
-    Write-Host ""
-}
-
-function Add-ToUserPath {
-    param([string]$Directory)
-    $currentPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
-    if ($currentPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $Directory.TrimEnd('\') }) {
-        Write-Host "    Already in PATH." -ForegroundColor DarkGray
-        return
-    }
-    [Environment]::SetEnvironmentVariable('PATH', "$currentPath;$Directory", 'User')
-    # Also update current session so it works immediately
-    $env:PATH = "$env:PATH;$Directory"
-    Write-Host "    ✓ Added to PATH. It will persist across terminal restarts." -ForegroundColor Green
-}
-
-if ($missing.Count -gt 0) {
-    Write-Host ""
-    Write-Host "  ─── Missing Tools ─────────────────────────────────────" -ForegroundColor Yellow
-    Write-Host ""
-
-    foreach ($tool in $missing) {
-        switch ($tool) {
-            'git' {
-                Find-OrInstall -ToolName 'Git' -ExeName 'git.exe' -Required 'required' `
-                    -CommonPaths @(
-                        'C:\Program Files\Git\cmd',
-                        'C:\Program Files (x86)\Git\cmd',
-                        'C:\Program Files\Git\bin'
-                    ) `
-                    -InstallAction {
-                        if ($hasWinget) {
-                            Write-Host "    Install with winget? [Y/n]: " -ForegroundColor Yellow -NoNewline
-                            $a = Read-Host
-                            if ($a.Trim() -notmatch '^[Nn]') {
-                                Write-Host "    Installing Git..." -ForegroundColor Cyan
-                                & winget install --id Git.Git -e --accept-package-agreements --accept-source-agreements
-                                Write-Host "    Done. You may need to restart your terminal." -ForegroundColor Green
-                            }
-                        }
-                        elseif ($hasChoco) {
-                            Write-Host "    Install with Chocolatey? [Y/n]: " -ForegroundColor Yellow -NoNewline
-                            $a = Read-Host
-                            if ($a.Trim() -notmatch '^[Nn]') {
-                                Write-Host "    Installing Git..." -ForegroundColor Cyan
-                                & choco install git -y
-                                Write-Host "    Done. You may need to restart your terminal." -ForegroundColor Green
-                            }
-                        }
-                        else {
-                            Write-Host "    Download manually: https://git-scm.com/downloads" -ForegroundColor Yellow
-                        }
-                    }
-            }
-            'git-tfs' {
-                Find-OrInstall -ToolName 'git-tfs' -ExeName 'git-tfs.exe' -Required 'required' `
-                    -CommonPaths @(
-                        'C:\Program Files\git-tfs',
-                        'C:\Program Files (x86)\git-tfs',
-                        'C:\Tools\git-tfs',
-                        'C:\ProgramData\chocolatey\lib\gittfs\tools'
-                    ) `
-                    -InstallAction {
-                        if ($hasChoco) {
-                            Write-Host "    Install with Chocolatey? [Y/n]: " -ForegroundColor Yellow -NoNewline
-                            $a = Read-Host
-                            if ($a.Trim() -notmatch '^[Nn]') {
-                                Write-Host "    Installing git-tfs..." -ForegroundColor Cyan
-                                & choco install gittfs -y
-                                Write-Host "    Done. You may need to restart your terminal." -ForegroundColor Green
-                            }
-                        }
-                        else {
-                            Write-Host "    Download from: https://github.com/git-tfs/git-tfs/releases" -ForegroundColor Yellow
-                            Write-Host "    Extract the zip, then re-run this check and point it to the folder." -ForegroundColor DarkGray
-                        }
-                        Write-Host "    NOTE: git-tfs requires .NET Framework (usually already on Windows)." -ForegroundColor DarkGray
-                    }
-            }
-            'git-filter-repo' {
-                Find-OrInstall -ToolName 'git-filter-repo' -ExeName 'git-filter-repo.exe' -Required 'optional' `
-                    -CommonPaths @(
-                        'C:\Python3*\Scripts',
-                        'C:\Users\*\AppData\Local\Programs\Python\Python3*\Scripts'
-                    ) `
-                    -InstallAction {
-                        $pipCmd = if (Get-Command 'pip3' -ErrorAction SilentlyContinue) { 'pip3' } elseif (Get-Command 'pip' -ErrorAction SilentlyContinue) { 'pip' } else { $null }
-                        if ($pipCmd) {
-                            Write-Host "    Install with pip? [Y/n]: " -ForegroundColor Yellow -NoNewline
-                            $a = Read-Host
-                            if ($a.Trim() -notmatch '^[Nn]') {
-                                Write-Host "    Installing git-filter-repo..." -ForegroundColor Cyan
-                                & $pipCmd install git-filter-repo
-                                Write-Host "    Done." -ForegroundColor Green
-                            }
-                        }
-                        elseif ($hasChoco) {
-                            Write-Host "    Install with Chocolatey? [Y/n]: " -ForegroundColor Yellow -NoNewline
-                            $a = Read-Host
-                            if ($a.Trim() -notmatch '^[Nn]') {
-                                Write-Host "    Installing git-filter-repo..." -ForegroundColor Cyan
-                                & choco install git-filter-repo -y
-                                Write-Host "    Done." -ForegroundColor Green
-                            }
-                        }
-                        else {
-                            Write-Host "    Install manually: https://github.com/newren/git-filter-repo" -ForegroundColor Yellow
-                            Write-Host "    (The toolkit will fall back to git filter-branch if unavailable)" -ForegroundColor DarkGray
-                        }
-                    }
-            }
-            'git-lfs' {
-                Find-OrInstall -ToolName 'Git LFS' -ExeName 'git-lfs.exe' -Required 'optional' `
-                    -CommonPaths @(
-                        'C:\Program Files\Git LFS',
-                        'C:\Program Files\Git\mingw64\bin',
-                        'C:\Program Files (x86)\Git LFS'
-                    ) `
-                    -InstallAction {
-                        if ($hasWinget) {
-                            Write-Host "    Install with winget? [Y/n]: " -ForegroundColor Yellow -NoNewline
-                            $a = Read-Host
-                            if ($a.Trim() -notmatch '^[Nn]') {
-                                Write-Host "    Installing Git LFS..." -ForegroundColor Cyan
-                                & winget install --id GitHub.GitLFS -e --accept-package-agreements --accept-source-agreements
-                                & git lfs install 2>$null
-                                Write-Host "    Done." -ForegroundColor Green
-                            }
-                        }
-                        elseif ($hasChoco) {
-                            Write-Host "    Install with Chocolatey? [Y/n]: " -ForegroundColor Yellow -NoNewline
-                            $a = Read-Host
-                            if ($a.Trim() -notmatch '^[Nn]') {
-                                Write-Host "    Installing Git LFS..." -ForegroundColor Cyan
-                                & choco install git-lfs -y
-                                & git lfs install 2>$null
-                                Write-Host "    Done." -ForegroundColor Green
-                            }
-                        }
-                        else {
-                            Write-Host "    Download manually: https://git-lfs.github.com/" -ForegroundColor Yellow
-                        }
-                    }
-            }
-        }
+Write-Host "Checking Git LFS..." -NoNewline
+$gitLfsCheck = Test-Prereq-GitLfs
+switch ($gitLfsCheck.Status) {
+    'OK'      { Write-Host " OK ($($gitLfsCheck.Detail))" -ForegroundColor Green }
+    'MISSING' {
+        Write-Host " MISSING ($($gitLfsCheck.Detail))" -ForegroundColor Yellow
+        $missingOptional += 'Git-LFS'
     }
 }
 
-# ─── Summary ──────────────────────────────────────────────────────────────────
+# ─── Network Connectivity (optional) ─────────────────────────────────────────
 
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-if ($allGood) {
-    Write-Host "  All required prerequisites are installed!" -ForegroundColor Green
-    Write-Host "  You're ready to run migrations." -ForegroundColor Cyan
+Write-Host "Network connectivity test..." -NoNewline
+Write-Host " SKIPPED (run Invoke-TfvcDiscovery.ps1 to test ADO connection)" -ForegroundColor Yellow
+
+# ─── Auto-Install Prompt ─────────────────────────────────────────────────────
+
+$allMissing = $missingRequired + $missingOptional
+
+if ($allMissing.Count -gt 0) {
+    Write-Host ""
+    Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+    if ($missingRequired.Count -gt 0) {
+        Write-Host "  Missing required: $($missingRequired -join ', ')" -ForegroundColor Red
+    }
+    if ($missingOptional.Count -gt 0) {
+        Write-Host "  Missing optional: $($missingOptional -join ', ')" -ForegroundColor Yellow
+    }
+    Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
+
+    $response = Read-Host "Would you like to automatically install the missing prerequisites? (Y/N)"
+
+    if ($response -match '^[Yy]') {
+        Write-Host ""
+        Write-Host "─── Automatic Installation ─────────────────────────────" -ForegroundColor Cyan
+        Write-Host ""
+
+        $installResults = @{}
+
+        foreach ($tool in $allMissing) {
+            Write-Host "[$tool] Installing..." -ForegroundColor Cyan
+            switch ($tool) {
+                'Git'             { $installResults[$tool] = Install-Prereq-Git }
+                'git-tfs'         { $installResults[$tool] = Install-Prereq-GitTfs }
+                'Git-LFS'         { $installResults[$tool] = Install-Prereq-GitLfs }
+            }
+            if ($installResults[$tool]) {
+                Write-Host "[$tool] Install completed." -ForegroundColor Green
+            } else {
+                Write-Host "[$tool] Install failed." -ForegroundColor Red
+            }
+            Write-Host ""
+        }
+
+        # ─── Refresh PATH and Re-verify ──────────────────────────────────
+        Write-Host "─── Verifying Installations ────────────────────────────" -ForegroundColor Cyan
+        Write-Host ""
+
+        # Refresh PATH from registry to pick up changes made by installers
+        $machinePath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
+        $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+        $env:PATH = "$userPath;$machinePath"
+        # Re-add tools dir and scan subdirectories for installed executables
+        Add-ToSessionPath $toolsDir
+        Sync-ToolsDirToPath
+
+        # Show which PATH entries were added
+        Write-Host "PATH entries for installed tools:" -ForegroundColor DarkGray
+        $userPathEntries = ($userPath -split ';') | Where-Object { $_ -like "*$toolsDir*" }
+        if ($userPathEntries) {
+            $userPathEntries | ForEach-Object { Write-Host "    [User PATH] $_" -ForegroundColor DarkGray }
+        }
+        foreach ($tool in $allMissing) {
+            switch ($tool) {
+                'Git' {
+                    @("${env:ProgramFiles}\Git\cmd") | Where-Object { $env:PATH -like "*$_*" } | ForEach-Object {
+                        Write-Host "    [Session PATH] $_" -ForegroundColor DarkGray
+                    }
+                }
+                'Git-LFS' {
+                    @("${env:ProgramFiles}\Git LFS") | Where-Object { $env:PATH -like "*$_*" } | ForEach-Object {
+                        Write-Host "    [Session PATH] $_" -ForegroundColor DarkGray
+                    }
+                }
+            }
+        }
+        Write-Host ""
+
+        $verifyFailed = @()
+
+        foreach ($tool in $allMissing) {
+            Write-Host "Verifying $tool..." -NoNewline
+            switch ($tool) {
+                'Git' {
+                    $check = Test-Prereq-Git
+                    if ($check.Status -eq 'OK') {
+                        Write-Host " OK ($($check.Detail))" -ForegroundColor Green
+                    } else {
+                        Write-Host " FAILED" -ForegroundColor Red
+                        $verifyFailed += $tool
+                    }
+                }
+                'git-tfs' {
+                    $check = Test-Prereq-GitTfs
+                    if ($check.Status -eq 'OK') {
+                        Write-Host " OK ($($check.Detail))" -ForegroundColor Green
+                    } else {
+                        Write-Host " FAILED" -ForegroundColor Red
+                        $verifyFailed += $tool
+                    }
+                }
+                'Git-LFS' {
+                    $check = Test-Prereq-GitLfs
+                    if ($check.Status -eq 'OK') {
+                        Write-Host " OK ($($check.Detail))" -ForegroundColor Green
+                    } else {
+                        Write-Host " FAILED" -ForegroundColor Red
+                        $verifyFailed += $tool
+                    }
+                }
+            }
+        }
+
+        Write-Host ""
+        Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+        if ($verifyFailed.Count -eq 0) {
+            Write-Host "  All prerequisites installed and verified!" -ForegroundColor Green
+            Write-Host "  NOTE: You may need to restart your terminal for PATH" -ForegroundColor Yellow
+            Write-Host "  changes to take effect in other sessions." -ForegroundColor Yellow
+        } else {
+            Write-Host "  Some tools could not be verified: $($verifyFailed -join ', ')" -ForegroundColor Red
+            Write-Host "  Try restarting your terminal, or install them manually." -ForegroundColor Yellow
+        }
+        Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+    }
+    else {
+        Write-Host ""
+        Write-Host "Manual installation references:" -ForegroundColor Yellow
+        foreach ($tool in $allMissing) {
+            switch ($tool) {
+                'Git'             { Write-Host "  Git:             https://git-scm.com/downloads" -ForegroundColor Yellow }
+                'git-tfs'         { Write-Host "  git-tfs:         https://github.com/git-tfs/git-tfs/releases" -ForegroundColor Yellow }
+                'Git-LFS'         { Write-Host "  Git LFS:         https://git-lfs.github.com/" -ForegroundColor Yellow }
+            }
+        }
+        Write-Host ""
+        Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+        Write-Host "  Install the missing tools and re-run this script." -ForegroundColor Red
+        Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+    }
 }
 else {
-    Write-Host "  Some required tools were missing." -ForegroundColor Yellow
-    Write-Host "  If you just installed them, restart your terminal and re-run this check." -ForegroundColor Yellow
+    # ─── All Good Summary ─────────────────────────────────────────────────────
+    Write-Host ""
+    Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "  All required prerequisites are installed!" -ForegroundColor Green
+    Write-Host "  Next: cp config/migration-config.example.json config/migration-config.json" -ForegroundColor Cyan
+    Write-Host "  Then: Edit config/migration-config.json with your ADO server details" -ForegroundColor Cyan
+    Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
 }
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan

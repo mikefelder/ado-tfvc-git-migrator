@@ -30,7 +30,7 @@ No need to remember parameter names or edit JSON by hand.
 
 ## Excel-Driven Batch Migration (Option 9)
 
-The primary workflow for McDermott's migration. Reads the **MDR-4ADO-AllProjects.xlsx** spreadsheet ("GAMS-Repos-App-Folder level" worksheet) and processes every row:
+The primary workflow for Contoso's migration. Reads the **MDR-4ADO-AllProjects.xlsx** spreadsheet ("GAMS-Repos-App-Folder level" worksheet) and processes every row:
 
 - **Column G = "Repo" + Recommendation = "Migrate"** → Converts the entire TFVC repo to Git as-is. If multiple spreadsheet rows reference the same repo (one per subfolder), it's only migrated once.
 - **Column G = "Folder" + Recommendation = "Migrate"** → Extracts that folder from the parent repo into a standalone Git repo named `RepoName_FolderName`. All folders from the same parent are extracted in a single batch.
@@ -92,7 +92,7 @@ cp config/migration-config.example.json config/migration-config.json
 
 # 5. Push to GitHub Enterprise
 ./Push-ToGitHub.ps1 -ConfigPath ./config/migration-config.json `
-    -RepoPath ./output/app-a-repo -GitHubOrg "McDermott" -GitHubRepo "app-a-repo"
+    -RepoPath ./output/app-a-repo -GitHubOrg "Contoso" -GitHubRepo "app-a-repo"
 ```
 
 ## Scripts
@@ -136,13 +136,13 @@ Key settings:
 
 | Setting | Description |
 |---|---|
-| `adoServerUrl` | Your ADO 2022 base URL (e.g. `https://ado.mcdermott.com`) |
+| `adoServerUrl` | Your ADO 2022 base URL (e.g. `https://ado.contoso.com`) |
 | `collections` | Map of collection names, each with a `pat` and optional `description` |
 | `outputDirectory` | Where converted Git repos are written (default: `./output`) |
 | `logDirectory` | Where log files are written (default: `./logs`) |
 | `gitTfsPath` | Path to git-tfs if it's not in your PATH |
 | `authorMappingFile` | Optional CSV mapping TFVC usernames → Git authors |
-| `github.enterpriseUrl` | GitHub Enterprise URL (e.g. `https://github.mcdermott.com`) |
+| `github.enterpriseUrl` | GitHub Enterprise URL (e.g. `https://github.contoso.com`) |
 | `github.pat` | GitHub PAT with `repo` scope |
 | `github.defaultOrg` | Default GitHub organization for new repos |
 
@@ -181,8 +181,8 @@ TFVC commits use `DOMAIN\username`. To map these to proper Git authors, create a
 
 ```csv
 TfvcIdentity,GitName,GitEmail
-MCDERMOTT\jsmith,John Smith,jsmith@mcdermott.com
-MCDERMOTT\jdoe,Jane Doe,jdoe@mcdermott.com
+CONTOSO\jsmith,John Smith,jsmith@contoso.com
+CONTOSO\jdoe,Jane Doe,jdoe@contoso.com
 ```
 
 Set the path via config (`authorMappingFile`) or generate a template during discovery:

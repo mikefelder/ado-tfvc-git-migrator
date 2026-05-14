@@ -53,7 +53,7 @@
 .EXAMPLE
     ./Push-ToGitHub.ps1 -ConfigPath ./config/migration-config.json `
         -RepoPath ./output/legacy-app `
-        -GitHubOrg "McDermott" -GitHubRepo "legacy-app"
+        -GitHubOrg "Contoso" -GitHubRepo "legacy-app"
 #>
 
 [CmdletBinding()]
@@ -139,7 +139,7 @@ if ($Interactive) {
     $defaultRepoName = $gitRepos[$repoIdx].Name
 
     # 2. GitHub Org
-    $defaultOrg = if ($config -and $config.github.defaultOrg) { $config.github.defaultOrg } else { 'McDermott' }
+    $defaultOrg = if ($config -and $config.github.defaultOrg) { $config.github.defaultOrg } else { 'Contoso' }
     Write-Host ""
     Write-Host "  GitHub organization [$defaultOrg]: " -ForegroundColor Yellow -NoNewline
     $orgInput = Read-Host

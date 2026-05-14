@@ -6,7 +6,7 @@
             "sourceCollection": "GAMS",
             "sourceProject": "LegacyApp",
             "tfvcPath": "$/LegacyApp",
-            "gitHubOrg": "McDermott",
+            "gitHubOrg": "Contoso",
             "gitHubRepo": "legacy-app",
             "description": "Full TFVC migration of LegacyApp"
         },
@@ -19,17 +19,17 @@
             "splits": [
                 {
                     "tfvcFolder": "$/MonoRepo/ServiceA",
-                    "gitHubOrg": "McDermott",
+                    "gitHubOrg": "Contoso",
                     "gitHubRepo": "service-a"
                 },
                 {
                     "tfvcFolder": "$/MonoRepo/ServiceB",
-                    "gitHubOrg": "McDermott",
+                    "gitHubOrg": "Contoso",
                     "gitHubRepo": "service-b"
                 },
                 {
                     "tfvcFolder": "$/MonoRepo/SharedLib",
-                    "gitHubOrg": "McDermott",
+                    "gitHubOrg": "Contoso",
                     "gitHubRepo": "shared-lib"
                 }
             ]
@@ -43,7 +43,7 @@
             "targetCollection": "TargetCollection",
             "targetProject": "Platform",
             "targetRepoName": "component",
-            "gitHubOrg": "McDermott",
+            "gitHubOrg": "Contoso",
             "gitHubRepo": "component",
             "description": "Moved from GAMS to ModernApps, then to GitHub"
         }

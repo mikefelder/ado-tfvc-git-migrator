@@ -450,7 +450,7 @@ if ($Interactive -and $adoDestinations -and $adoDestinations.Count -gt 0) {
 Write-Host ""
 Write-Host "Next steps — push each repo to GitHub:" -ForegroundColor Cyan
 foreach ($result in $results) {
-    Write-Host "  ./Push-ToGitHub.ps1 -RepoPath `"$($result.OutputPath)`" -GitHubOrg McDermott -GitHubRepo $($result.GitRepo)" -ForegroundColor Cyan
+    Write-Host "  ./Push-ToGitHub.ps1 -RepoPath `"$($result.OutputPath)`" -GitHubOrg Contoso -GitHubRepo $($result.GitRepo)" -ForegroundColor Cyan
 }
 
 Write-MigrationLog -Message "Log file: $logFile" -LogFile $logFile -Level INFO

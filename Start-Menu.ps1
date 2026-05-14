@@ -30,7 +30,7 @@ function Show-Banner {
     Write-Host "  ╔═══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host "  ║                                                           ║" -ForegroundColor Cyan
     Write-Host "  ║     ADO TFVC → Git Migration Toolkit                     ║" -ForegroundColor Cyan
-    Write-Host "  ║     McDermott — GitHub Enterprise Migration               ║" -ForegroundColor Cyan
+    Write-Host "  ║     Contoso — GitHub Enterprise Migration               ║" -ForegroundColor Cyan
     Write-Host "  ║                                                           ║" -ForegroundColor Cyan
     Write-Host "  ╚═══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""

@@ -1,5 +1,5 @@
 {
-    "adoServerUrl": "https://ado.mcdermott.com",
+    "adoServerUrl": "https://ado.contoso.com",
     "collections": {
         "GAMS": {
             "pat": "YOUR_PAT_HERE",
@@ -16,10 +16,10 @@
     "authorMappingFile": null,
     "defaultBranch": "main",
     "github": {
-        "enterpriseUrl": "https://github.mcdermott.com",
-        "apiUrl": "https://github.mcdermott.com/api/v3",
+        "enterpriseUrl": "https://github.contoso.com",
+        "apiUrl": "https://github.contoso.com/api/v3",
         "pat": "YOUR_GITHUB_PAT_HERE",
-        "defaultOrg": "McDermott"
+        "defaultOrg": "Contoso"
     },
     "migrationDefaults": {
         "includeHistory": true,

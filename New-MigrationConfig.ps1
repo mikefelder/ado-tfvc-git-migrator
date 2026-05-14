@@ -128,7 +128,7 @@ if (-not $config) {
 Show-MenuHeader -Title "Step 1 of 4: ADO Server Connection"
 
 Write-Host "  This is the base URL of your Azure DevOps Server 2022 instance." -ForegroundColor DarkGray
-Write-Host "  Example: https://ado.mcdermott.com" -ForegroundColor DarkGray
+Write-Host "  Example: https://ado.contoso.com" -ForegroundColor DarkGray
 Write-Host ""
 
 $config.adoServerUrl = Read-WithDefault -Prompt 'ADO Server URL' -Default $config.adoServerUrl
@@ -213,7 +213,7 @@ Write-Host "  Configure GitHub Enterprise? [y/N]: " -ForegroundColor Yellow -NoN
 $ghChoice = Read-Host
 
 if ($ghChoice.Trim() -match '^[Yy]') {
-    $ghUrl = Read-WithDefault -Prompt 'GitHub Enterprise URL (e.g. https://github.mcdermott.com)' -Default $config.github.enterpriseUrl
+    $ghUrl = Read-WithDefault -Prompt 'GitHub Enterprise URL (e.g. https://github.contoso.com)' -Default $config.github.enterpriseUrl
     $config.github.enterpriseUrl = $ghUrl
 
     # Auto-derive API URL

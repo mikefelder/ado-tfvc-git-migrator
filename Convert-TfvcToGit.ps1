@@ -362,4 +362,4 @@ Write-MigrationLog -Message "  Log:      $logFile" -LogFile $logFile -Level INFO
 
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  Push to GitHub:  ./Push-ToGitHub.ps1 -RepoPath `"$outputPath`" -GitHubOrg McDermott -GitHubRepo $OutputRepoName" -ForegroundColor Cyan
+Write-Host "  Push to GitHub:  ./Push-ToGitHub.ps1 -RepoPath `"$outputPath`" -GitHubOrg Contoso -GitHubRepo $OutputRepoName" -ForegroundColor Cyan

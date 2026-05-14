@@ -31,7 +31,7 @@
                 "sourceCollection": "GAMS",
                 "sourceProject": "LegacyApp",
                 "tfvcPath": "$/LegacyApp",
-                "gitHubOrg": "McDermott",
+                "gitHubOrg": "Contoso",
                 "gitHubRepo": "legacy-app",
                 "description": "Full legacy app migration"
             },
@@ -44,12 +44,12 @@
                 "splits": [
                     {
                         "tfvcFolder": "$/MonoRepo/ServiceA",
-                        "gitHubOrg": "McDermott",
+                        "gitHubOrg": "Contoso",
                         "gitHubRepo": "service-a"
                     },
                     {
                         "tfvcFolder": "$/MonoRepo/ServiceB",
-                        "gitHubOrg": "McDermott",
+                        "gitHubOrg": "Contoso",
                         "gitHubRepo": "service-b"
                     }
                 ]
@@ -63,7 +63,7 @@
                 "targetCollection": "ModernApps",
                 "targetProject": "Platform",
                 "targetRepoName": "component",
-                "gitHubOrg": "McDermott",
+                "gitHubOrg": "Contoso",
                 "gitHubRepo": "component"
             }
         ]

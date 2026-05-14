@@ -304,9 +304,20 @@ foreach ($i in 0..($plan.migrations.Count - 1)) {
         }
     }
     catch {
-        $status = 'Failed'
         $errorMsg = $_.Exception.Message
-        Write-MigrationLog -Message "[$idx/$totalCount] FAILED: $name — $errorMsg" -LogFile $logFile -Level ERROR
+
+        # Detect path-too-long errors specifically
+        if ($errorMsg -match 'too long|path.*long|248 char|260 char|TF400959|PathTooLong|could not find a part of the path') {
+            $status = 'PathTooLong'
+            $errorMsg = "File paths exceed the Windows 260-character limit. " +
+                "Try migrating specific subfolders instead of the entire repo, " +
+                "or rename deeply nested paths in TFVC first."
+        }
+        else {
+            $status = 'Failed'
+        }
+
+        Write-MigrationLog -Message "[$idx/$totalCount] $($status): $name — $errorMsg" -LogFile $logFile -Level ERROR
 
         if ($StopOnError) {
             throw "Migration stopped on error at [$idx/$totalCount] $name"

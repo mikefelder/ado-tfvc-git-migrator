@@ -1,4 +1,4 @@
-# ADO TFVC-to-Git Migrator
+so when # ADO TFVC-to-Git Migrator
 
 A PowerShell toolkit for migrating TFVC repositories from Azure DevOps Server 2022 to Git and GitHub Enterprise. Every script has a guided **interactive mode** with menus, so no command-line experience is required.
 
@@ -223,8 +223,30 @@ Common issues and what to do:
 | "Authentication failed — your PAT may be expired" | PAT expired or wrong | Generate a new PAT in ADO and update your config |
 | "Access denied — your PAT doesn't have the required permissions" | Missing PAT scopes | Ensure `Code (Read & Write)` and `Project and Team (Read)` |
 | "Basic authentication requires a secure connection" | Server URL uses `http://` | Change `adoServerUrl` in your config to `https://` |
-| TF400959 "limit of 248 characters" | Windows path length limit hit by deeply nested TFVC files | The toolkit enables `core.longpaths` automatically. Also shorten `outputDirectory` in your config (e.g. `C:\M\Out` instead of a long user-profile path). On Windows, enable long paths system-wide via `reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v LongPathsEnabled /t REG_DWORD /d 1 /f` (requires admin + reboot). |
+| TF400959 "limit of 248 characters" / path too long errors | Windows MAX_PATH limit hit by deeply nested TFVC files | The toolkit now automatically uses `subst` to create a short drive-letter path during cloning, which dramatically reduces path length. This happens transparently — no manual steps needed. If you still hit issues: **1)** Set `outputDirectory` to something very short like `C:\M`; **2)** Enable long paths system-wide: `reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v LongPathsEnabled /t REG_DWORD /d 1 /f` (admin + reboot); **3)** Ensure `core.longpaths` is set (the toolkit does this automatically). If paths in TFVC exceed ~200 characters even after the drive root, consider using the `Split-TfvcToGitRepos.ps1` script to clone only the subfolder you need rather than the entire project tree. |
 | "Cannot reach the ADO server" | Network/VPN issue | Check VPN connection and server URL in config |
 | "git-tfs not found" | Tool not installed | Run `Install-Prerequisites.ps1` for instructions |
 | "Missing Required Module: ImportExcel" | ImportExcel not installed | Run `Install-Module ImportExcel -Scope CurrentUser -Force` |
 | Conversion seems frozen | Large repo with lots of history | Normal — a spinner shows elapsed time; check logs for progress |
+
+### Resuming After Failures (Skip & Continue)
+
+When the Excel-driven migration (`Invoke-ExcelMigration.ps1`) encounters a failure — especially a **PathTooLong** error — it records the status in the output manifest CSV. You can resume from where you left off:
+
+1. **Run the migration** — it produces a manifest CSV (e.g. `output/excel-migration-manifest-20260514-093000.csv`)
+2. **Open the manifest CSV** in Excel and review items with Status = `Failed` or `PathTooLong`
+3. **Change the Status** of any items you want to skip permanently to `Skipped`
+4. **Re-run with `-ResumeManifest`** — items marked `Success`, `Skipped`, or `PathTooLong` are automatically excluded:
+
+```powershell
+./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json -Interactive `
+    -ResumeManifest ./output/excel-migration-manifest-20260514-093000.csv
+```
+
+### Per-Folder Targeted Cloning
+
+When the Excel spreadsheet marks individual folders for migration (Repo or Folder = "Folder"), the toolkit clones **each folder independently** from its specific TFVC path (e.g. `$/InformationTechnology/CMeR`) rather than cloning the entire parent repository. This means:
+
+- A deeply nested folder like `PICASharepointSolution` won't prevent `CMeR`, `Coreworx`, or other sibling folders from migrating
+- Each folder is isolated — if one fails, the rest continue
+- Cloning is faster because only the relevant folder's files and history are downloaded

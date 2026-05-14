@@ -240,7 +240,19 @@ try { & git config --global core.longpaths true 2>$null } catch { }
 $tfsUrl = "$($config.adoServerUrl)/$Collection"
 $depth = if ($HistoryDepth) { $HistoryDepth } elseif ($config.migrationDefaults.historyDepthLimit) { $config.migrationDefaults.historyDepthLimit } else { $null }
 
-$cloneArgs = "clone `"$tfsUrl`" `"$TfvcPath`" `"$outputPath`""
+# ── Path-length mitigation: use subst drive + short temp name during clone ──
+$substMapping = New-ShortClonePath -OutputDirectory $config.outputDirectory -LogFile $logFile
+$shortRepoName = Get-ShortRepoName -FullRepoName $OutputRepoName
+
+if ($substMapping) {
+    $clonePath = Join-Path $substMapping.BasePath $shortRepoName
+    Write-MigrationLog -Message "Using shortened clone path: $clonePath (final: $outputPath)" -LogFile $logFile
+}
+else {
+    $clonePath = $outputPath
+}
+
+$cloneArgs = "clone `"$tfsUrl`" `"$TfvcPath`" `"$clonePath`""
 
 if ($depth) {
     $cloneArgs += " --changeset=$depth"
@@ -277,12 +289,22 @@ try {
     Invoke-GitTfs -Arguments $cloneArgs -LogFile $logFile
     $cloneDuration = (Get-Date) - $cloneStart
     Write-MigrationLog -Message "git-tfs clone completed in $($cloneDuration.ToString('hh\:mm\:ss'))" -LogFile $logFile -Level SUCCESS
+
+    # Move from short temp path to final output path if subst was used
+    if ($substMapping -and $clonePath -ne $outputPath) {
+        $actualClonePath = Join-Path $substMapping.OriginalDir $shortRepoName
+        if (Test-Path $actualClonePath) {
+            Move-Item -Path $actualClonePath -Destination $outputPath -Force
+            Write-MigrationLog -Message "Moved clone from temp path to: $outputPath" -LogFile $logFile
+        }
+    }
 }
 catch {
     Write-Host "" -ForegroundColor Red
     Write-Host "  The conversion failed. Common causes:" -ForegroundColor Red
     Write-Host "    • Network connectivity issue to the ADO server" -ForegroundColor Yellow
     Write-Host "    • The TFVC path doesn't exist or you lack permissions" -ForegroundColor Yellow
+    Write-Host "    • File paths in TFVC are too deeply nested (path > 260 chars)" -ForegroundColor Yellow
     Write-Host "    • git-tfs encountered an unsupported TFVC structure" -ForegroundColor Yellow
     Write-Host "  Check the log file for details: $logFile" -ForegroundColor Yellow
     Write-Host "" -ForegroundColor Red
@@ -292,6 +314,10 @@ catch {
 finally {
     Remove-Item Env:\GIT_TFS_USERNAME -ErrorAction SilentlyContinue
     Remove-Item Env:\GIT_TFS_PASSWORD -ErrorAction SilentlyContinue
+    # Always clean up subst mapping
+    if ($substMapping) {
+        Remove-ShortClonePath -DriveLetter $substMapping.DriveLetter -LogFile $logFile
+    }
 }
 
 # ─── Post-Conversion ──────────────────────────────────────────────────────────

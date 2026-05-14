@@ -11,6 +11,10 @@
     - Repo or Folder = "Repo" + Recommendation = "Migrate*" → Convert entire repo from TFVC to Git, move to target
     - Repo or Folder = "Folder" + Recommendation = "Migrate*" → Spin out folder from parent repo into new Git repo, move to target
 
+    Each folder is cloned independently from its own TFVC path rather than cloning
+    the entire parent repo. This avoids path-too-long failures caused by deeply
+    nested files in sibling folders.
+
     Produces a comprehensive manifest of all actions taken.
 
 .PARAMETER ConfigPath
@@ -28,12 +32,23 @@
 .PARAMETER TargetProject
     Target ADO project to move migrated repos into. Required.
 
+.PARAMETER ResumeManifest
+    Path to a previous migration manifest CSV. Items already marked
+    'Success', 'Skipped', or 'PathTooLong' in the manifest will be
+    skipped automatically. Edit the CSV to change a failed item's
+    Status to 'Skipped' to exclude it from future runs.
+
 .PARAMETER Interactive
     Launch interactive mode — step-by-step guided flow with preview and confirmation.
 
 .EXAMPLE
     # Interactive mode (recommended)
     ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json -Interactive
+
+.EXAMPLE
+    # Resume from a previous run — skips items already completed or marked Skipped
+    ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json -Interactive `
+        -ResumeManifest ./output/excel-migration-manifest-20260514-093000.csv
 
 .EXAMPLE
     ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
@@ -53,6 +68,8 @@ param(
     [string]$TargetCollection,
 
     [string]$TargetProject,
+
+    [string]$ResumeManifest,
 
     [switch]$Interactive
 )
@@ -83,6 +100,43 @@ Import-Module ImportExcel
 
 $config = Read-MigrationConfig -ConfigPath $ConfigPath
 $logFile = Initialize-MigrationLog -LogDirectory $config.logDirectory -ScriptName 'ExcelMigration'
+
+# ─── Load Resume Manifest (if provided) ───────────────────────────────────────
+
+$resumeSkipSet = @{}
+if ($ResumeManifest) {
+    if (-not (Test-Path $ResumeManifest)) {
+        Write-Host "  Resume manifest not found: $ResumeManifest" -ForegroundColor Red
+        return
+    }
+
+    $previousManifest = Import-Csv $ResumeManifest
+    $resumeStatuses = @('Success', 'Skipped', 'PathTooLong')
+
+    foreach ($prev in $previousManifest) {
+        if ($prev.Status -in $resumeStatuses) {
+            # Key by Collection|Project|Repo|Folder to uniquely identify each item
+            $key = "$($prev.Collection)|$($prev.Project)|$($prev.Repo)|$($prev.Folder)"
+            $resumeSkipSet[$key] = $prev.Status
+        }
+    }
+
+    $resumeCount = $resumeSkipSet.Count
+    Write-MigrationLog -Message "Resume manifest loaded: $resumeCount item(s) will be skipped (Success/Skipped/PathTooLong)" -LogFile $logFile -Level INFO
+
+    if ($Interactive) {
+        Write-Host "  ┌─ Resuming from previous run ──────────────────────────┐" -ForegroundColor Green
+        Write-Host "  │  Loaded: $ResumeManifest" -ForegroundColor Green
+        Write-Host "  │  $resumeCount item(s) already completed or skipped    " -ForegroundColor Green
+        Write-Host "  │  will be excluded from this run.                       " -ForegroundColor Green
+        Write-Host "  └───────────────────────────────────────────────────────┘" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  Tip: To skip an item that failed, open the manifest CSV" -ForegroundColor DarkGray
+        Write-Host "  and change its Status from 'Failed' or 'PathTooLong' to" -ForegroundColor DarkGray
+        Write-Host "  'Skipped', then re-run with the same -ResumeManifest."   -ForegroundColor DarkGray
+        Write-Host ""
+    }
+}
 
 # ─── Step 1: Locate the Excel File ────────────────────────────────────────────
 
@@ -206,7 +260,11 @@ $archiveRows = [System.Collections.ArrayList]::new()
 $skipRows = [System.Collections.ArrayList]::new()
 $dataWarnings = [System.Collections.ArrayList]::new()
 
+$excelRowIndex = 1  # Header is row 1; first data row starts at 2
+$recommendationCol = 8  # Column H = Recommendation
+
 foreach ($row in $excelData) {
+    $excelRowIndex++
     $recommendation = ($row.Recommendation ?? '').ToString().Trim()
     $repoOrFolder = ($row.'Repo or Floder' ?? '').ToString().Trim()
     $reposType = ($row.'Repos Type' ?? '').ToString().Trim()
@@ -218,6 +276,7 @@ foreach ($row in $excelData) {
     # Build a standard entry
     $entry = [PSCustomObject]@{
         RowNo          = $row.No
+        ExcelRow       = $excelRowIndex
         Collection     = $collection
         Project        = $project
         Repo           = $repoName
@@ -250,9 +309,31 @@ foreach ($row in $excelData) {
         continue
     }
 
+    # Skip rows already marked as done/completed from a previous migration run
+    if ($recommendation -match '(?i)^(done|completed)$') {
+        $entry.Action = 'Skip'
+        $entry.Reason = "Already completed (marked '$recommendation' in spreadsheet)"
+        $entry.Status = 'Skipped'
+        [void]$skipRows.Add($entry)
+        continue
+    }
+
     # Silently ignore rows whose collection is not in the config (no PAT = can't migrate)
     if (-not $config.collections[$collection]) {
         continue
+    }
+
+    # ── Resume: skip items already completed or manually marked Skipped ──
+    if ($resumeSkipSet.Count -gt 0) {
+        $resumeKey = "$collection|$project|$repoName|$folderName"
+        if ($resumeSkipSet.ContainsKey($resumeKey)) {
+            $prevStatus = $resumeSkipSet[$resumeKey]
+            $entry.Action = 'Skip'
+            $entry.Reason = "Previously $prevStatus (from resume manifest)"
+            $entry.Status = 'Skipped'
+            [void]$skipRows.Add($entry)
+            continue
+        }
     }
 
     # Classify by recommendation
@@ -540,83 +621,121 @@ foreach ($group in $grouped) {
             $successCount++
             Write-Host "    ✓ Done" -ForegroundColor Green
             Write-MigrationLog -Message "Successfully migrated '$sourceRepo'" -LogFile $logFile -Level SUCCESS
+
+            # Update spreadsheet column H to mark as done
+            $rowsToMark = @($item.ExcelRow)
+            # Include any duplicate rows for the same repo
+            $skipRows | Where-Object {
+                $_.Collection -eq $item.Collection -and
+                $_.Project -eq $item.Project -and
+                $_.Repo -eq $item.Repo -and
+                $_.Reason -match 'Duplicate row'
+            } | ForEach-Object { $rowsToMark += $_.ExcelRow }
+
+            try {
+                $pkg = Open-ExcelPackage -Path $ExcelPath
+                $ws = $pkg.Workbook.Worksheets[$WorksheetName]
+                foreach ($excelRow in $rowsToMark) {
+                    $ws.Cells[$excelRow, $recommendationCol].Value = 'done'
+                }
+                Close-ExcelPackage $pkg -Save
+                Write-MigrationLog -Message "Updated $($rowsToMark.Count) Excel row(s) Recommendation -> 'done'" -LogFile $logFile -Level INFO
+            }
+            catch {
+                Write-MigrationLog -Message "Could not update Excel: $($_.Exception.Message)" -LogFile $logFile -Level WARN
+                Write-Host "    * Could not update spreadsheet (file may be open elsewhere)" -ForegroundColor Yellow
+            }
+
+            # Clean up local clone to free disk space
+            $localClonePath = Join-Path $config.outputDirectory $outputName
+            if (Test-Path $localClonePath) {
+                Remove-Item -Recurse -Force $localClonePath
+                Write-MigrationLog -Message "Cleaned up local clone: $localClonePath" -LogFile $logFile -Level INFO
+                Write-Host "    - Cleaned up local clone" -ForegroundColor DarkGray
+            }
         }
         catch {
-            $item.Status = 'Failed'
-            $item.Error = Get-FriendlyError -ErrorMessage $_.Exception.Message
+            $errMsg = $_.Exception.Message
+            $friendlyErr = Get-FriendlyError -ErrorMessage $errMsg
+
+            # Detect path-too-long errors specifically
+            if ($errMsg -match 'too long|path.*long|248 char|260 char|TF400959|PathTooLong|could not find a part of the path') {
+                $item.Status = 'PathTooLong'
+                $item.Error = "File paths in this repo exceed Windows' 260-character limit. " +
+                    "Consider splitting by folder or renaming deeply nested TFVC paths."
+                Write-Host "    ✗ PATH TOO LONG — $sourceRepo" -ForegroundColor Red
+                Write-Host "      This repo contains files exceeding the Windows path limit." -ForegroundColor Yellow
+            }
+            else {
+                $item.Status = 'Failed'
+                $item.Error = $friendlyErr
+                Write-Host "    ✗ Failed: $friendlyErr" -ForegroundColor Red
+            }
+
             $failCount++
-            Write-Host "    ✗ Failed: $($item.Error)" -ForegroundColor Red
-            Write-MigrationLog -Message "Failed to migrate '$sourceRepo': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
+            Write-MigrationLog -Message "Failed to migrate '$sourceRepo': $errMsg" -LogFile $logFile -Level ERROR
         }
     }
 
     # ── Folder Spin-Outs ──
+    # Clone each folder independently from its own TFVC path rather than cloning
+    # the entire repo and filtering. This avoids checking out deeply nested files
+    # from sibling folders (which can cause PathTooLong failures on Windows).
     if ($folderItems.Count -gt 0) {
-        $parentRepoType = $folderItems[0].RepoType
 
-        # Pre-clean staging directory to avoid interactive prompts in Split script
-        $stagingName = "staging-$(($sourceProject -replace '/', '-').ToLower())"
-        $stagingPath = Join-Path $config.outputDirectory $stagingName
-        if (Test-Path $stagingPath) {
-            Remove-Item -Recurse -Force $stagingPath
-        }
-
-        # Pre-clean output directories for each folder
-        foreach ($fi in $folderItems) {
-            $outPath = Join-Path $config.outputDirectory $fi.NewRepoName
-            if (Test-Path $outPath) {
-                Remove-Item -Recurse -Force $outPath
-            }
-        }
-
-        # Build batch mappings — all folders from this repo in one Split call
-        $batchMappings = @{}
-        foreach ($fi in $folderItems) {
-            $batchMappings["`$/$sourceProject/$($fi.Folder)"] = $fi.NewRepoName
-        }
-
-        Write-Host ""
-        Write-Host "    Extracting $($folderItems.Count) folder(s) from '$sourceRepo'..." -ForegroundColor Cyan
-
-        $splitFailed = $false
-        $splitError = ''
-
-        try {
-            & "$PSScriptRoot/Split-TfvcToGitRepos.ps1" `
-                -ConfigPath $ConfigPath `
-                -Collection $sourceCollection `
-                -ProjectName $sourceProject `
-                -TfvcPath "`$/$sourceProject" `
-                -FolderMappings $batchMappings
-
-            Write-Host "    ✓ All folders extracted" -ForegroundColor Green
-        }
-        catch {
-            $splitFailed = $true
-            $splitError = Get-FriendlyError -ErrorMessage $_.Exception.Message
-            Write-Host "    ✗ Folder extraction failed: $splitError" -ForegroundColor Red
-            Write-MigrationLog -Message "Split-TfvcToGitRepos failed for '$sourceRepo': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
-        }
-
-        # Move each extracted folder to the target (or mark as failed)
         foreach ($item in $folderItems) {
             $processedCount++
             $folderName = $item.Folder
             $folderOutputName = $item.NewRepoName
             $folderOutputPath = Join-Path $config.outputDirectory $folderOutputName
+            $folderTfvcPath = "`$/$sourceProject/$folderName"
 
             Write-Host ""
             Write-Host "  Working on $processedCount of $($migrateRows.Count)..." -ForegroundColor Cyan
+            Write-Host "    Extracting folder: $folderTfvcPath → '$folderOutputName'" -ForegroundColor White
 
-            if ($splitFailed -or -not (Test-Path $folderOutputPath)) {
-                $item.Status = 'Failed'
-                $item.Error = if ($splitFailed) { "Folder extraction failed — $splitError" } else { "Output not found after extraction" }
+            # Pre-clean output directory
+            if (Test-Path $folderOutputPath) {
+                Remove-Item -Recurse -Force $folderOutputPath
+            }
+
+            try {
+                # Clone directly from the folder's TFVC path — only checks out files in this folder
+                & "$PSScriptRoot/Convert-TfvcToGit.ps1" `
+                    -ConfigPath $ConfigPath `
+                    -Collection $sourceCollection `
+                    -ProjectName $sourceProject `
+                    -TfvcPath $folderTfvcPath `
+                    -OutputRepoName $folderOutputName
+
+                Write-Host "    ✓ Extracted '$folderName'" -ForegroundColor Green
+                Write-MigrationLog -Message "Successfully extracted '$folderName' as '$folderOutputName'" -LogFile $logFile -Level SUCCESS
+            }
+            catch {
+                $errMsg = $_.Exception.Message
+                $friendlyErr = Get-FriendlyError -ErrorMessage $errMsg
+
+                # Detect path-too-long errors specifically
+                if ($errMsg -match 'too long|path.*long|248 char|260 char|TF400959|PathTooLong|could not find a part of the path') {
+                    $item.Status = 'PathTooLong'
+                    $item.Error = "File paths in this folder exceed Windows' 260-character limit. " +
+                        "This folder must be migrated manually or the deeply nested files renamed in TFVC first."
+                    Write-Host "    ✗ PATH TOO LONG — $folderName" -ForegroundColor Red
+                    Write-Host "      This folder contains files with paths exceeding the Windows limit." -ForegroundColor Yellow
+                    Write-Host "      Mark this item as 'Skipped' in the manifest to exclude it from future runs." -ForegroundColor Yellow
+                }
+                else {
+                    $item.Status = 'Failed'
+                    $item.Error = $friendlyErr
+                    Write-Host "    ✗ Failed: $friendlyErr" -ForegroundColor Red
+                }
+
                 $failCount++
-                Write-Host "    ✗ ${folderOutputName}: $($item.Error)" -ForegroundColor Red
-                Write-MigrationLog -Message "Skipping move for '$folderName' — extraction failed" -LogFile $logFile -Level ERROR
+                Write-MigrationLog -Message "Failed to extract '$folderName': $errMsg" -LogFile $logFile -Level ERROR
                 continue
             }
 
+            # Move to target collection/project
             Write-Host "    Moving '$folderOutputName' to $TargetCollection / $TargetProject..." -ForegroundColor White
 
             try {
@@ -624,7 +743,7 @@ foreach ($group in $grouped) {
                     -ConfigPath $ConfigPath `
                     -SourceCollection $sourceCollection `
                     -SourceProject $sourceProject `
-                    -TfvcPath "`$/$sourceProject/$folderName" `
+                    -TfvcPath $folderTfvcPath `
                     -TargetCollection $TargetCollection `
                     -TargetProject $TargetProject `
                     -TargetRepoName $folderOutputName
@@ -632,7 +751,27 @@ foreach ($group in $grouped) {
                 $item.Status = 'Success'
                 $successCount++
                 Write-Host "    ✓ Done" -ForegroundColor Green
-                Write-MigrationLog -Message "Successfully extracted '$folderName' as '$folderOutputName'" -LogFile $logFile -Level SUCCESS
+                Write-MigrationLog -Message "Successfully moved '$folderOutputName' to $TargetCollection/$TargetProject" -LogFile $logFile -Level SUCCESS
+
+                # Update spreadsheet column H to mark as done
+                try {
+                    $pkg = Open-ExcelPackage -Path $ExcelPath
+                    $ws = $pkg.Workbook.Worksheets[$WorksheetName]
+                    $ws.Cells[$item.ExcelRow, $recommendationCol].Value = 'done'
+                    Close-ExcelPackage $pkg -Save
+                    Write-MigrationLog -Message "Updated Excel row $($item.ExcelRow) Recommendation -> 'done'" -LogFile $logFile -Level INFO
+                }
+                catch {
+                    Write-MigrationLog -Message "Could not update Excel row $($item.ExcelRow): $($_.Exception.Message)" -LogFile $logFile -Level WARN
+                    Write-Host "    * Could not update spreadsheet (file may be open elsewhere)" -ForegroundColor Yellow
+                }
+
+                # Clean up local clone to free disk space
+                if (Test-Path $folderOutputPath) {
+                    Remove-Item -Recurse -Force $folderOutputPath
+                    Write-MigrationLog -Message "Cleaned up local clone: $folderOutputPath" -LogFile $logFile -Level INFO
+                    Write-Host "    - Cleaned up local clone" -ForegroundColor DarkGray
+                }
             }
             catch {
                 $item.Status = 'Failed'
@@ -641,11 +780,6 @@ foreach ($group in $grouped) {
                 Write-Host "    ✗ Failed: $($item.Error)" -ForegroundColor Red
                 Write-MigrationLog -Message "Failed to move '$folderName': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
             }
-        }
-
-        # Clean up staging directory
-        if (Test-Path $stagingPath) {
-            Remove-Item -Recurse -Force $stagingPath -ErrorAction SilentlyContinue
         }
     }
 }
@@ -684,18 +818,19 @@ $allActions | Select-Object RowNo, Collection, Project, Repo, Folder, NewRepoNam
 # Write JSON report
 $reportPath = Join-Path $config.outputDirectory "excel-migration-report-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
 $report = @{
-    startTime     = $startTime.ToString('o')
-    endTime       = (Get-Date).ToString('o')
-    duration      = $totalDuration.ToString('hh\:mm\:ss')
-    excelFile     = $ExcelPath
-    worksheet     = $WorksheetName
-    target        = "$TargetCollection/$TargetProject"
-    totalRows     = $excelData.Count
-    migrateCount  = $migrateRows.Count
-    archiveCount  = $archiveRows.Count
-    skipCount     = $skipRows.Count
-    successCount  = $successCount
-    failCount     = $failCount
+    startTime        = $startTime.ToString('o')
+    endTime          = (Get-Date).ToString('o')
+    duration         = $totalDuration.ToString('hh\:mm\:ss')
+    excelFile        = $ExcelPath
+    worksheet        = $WorksheetName
+    target           = "$TargetCollection/$TargetProject"
+    totalRows        = $excelData.Count
+    migrateCount     = $migrateRows.Count
+    archiveCount     = $archiveRows.Count
+    skipCount        = $skipRows.Count
+    successCount     = $successCount
+    failCount        = $failCount
+    pathTooLongCount = $pathTooLongCount
 }
 $report | ConvertTo-Json -Depth 5 | Out-File $reportPath -Encoding utf8
 
@@ -711,16 +846,42 @@ Write-Host "  ╚═════════════════════
 Write-Host ""
 Write-Host "  Time elapsed:  $($totalDuration.ToString('hh\:mm\:ss'))" -ForegroundColor White
 Write-Host ""
+
+$pathTooLongCount = @($migrateRows | Where-Object { $_.Status -eq 'PathTooLong' }).Count
+$otherFailCount = $failCount - $pathTooLongCount
+
 Write-Host "  Results:" -ForegroundColor White
 Write-Host "    ✓ Successful:    $successCount" -ForegroundColor Green
-if ($failCount -gt 0) {
-    Write-Host "    ✗ Failed:        $failCount" -ForegroundColor Red
+if ($pathTooLongCount -gt 0) {
+    Write-Host "    ✗ Path too long: $pathTooLongCount (file paths exceed Windows limit)" -ForegroundColor Magenta
+}
+if ($otherFailCount -gt 0) {
+    Write-Host "    ✗ Failed:        $otherFailCount" -ForegroundColor Red
 }
 Write-Host "    ○ Archived:      $($archiveRows.Count) (not migrated)" -ForegroundColor Yellow
 Write-Host "    ○ Skipped:       $($skipRows.Count)" -ForegroundColor DarkGray
 Write-Host ""
 
-if ($failCount -gt 0) {
+# Show PathTooLong items with specific guidance
+if ($pathTooLongCount -gt 0) {
+    Write-Host "  ┌─ Items with paths too long ───────────────────────────┐" -ForegroundColor Magenta
+    foreach ($f in ($migrateRows | Where-Object { $_.Status -eq 'PathTooLong' })) {
+        $label = "$($f.Collection)/$($f.Project)/$($f.Repo)"
+        if ($f.Folder) { $label += "/$($f.Folder)" }
+        Write-Host "  │  ✗ $label" -ForegroundColor Magenta
+    }
+    Write-Host "  │" -ForegroundColor Magenta
+    Write-Host "  │  These items contain deeply nested file paths that" -ForegroundColor Magenta
+    Write-Host "  │  exceed Windows' 260-character limit. Options:" -ForegroundColor Magenta
+    Write-Host "  │    1. Rename the deeply nested folders in TFVC" -ForegroundColor Yellow
+    Write-Host "  │    2. Migrate them manually via a different method" -ForegroundColor Yellow
+    Write-Host "  │    3. Mark as 'Skipped' in the manifest CSV to" -ForegroundColor Yellow
+    Write-Host "  │       exclude from future runs" -ForegroundColor Yellow
+    Write-Host "  └───────────────────────────────────────────────────────┘" -ForegroundColor Magenta
+    Write-Host ""
+}
+
+if ($otherFailCount -gt 0) {
     Write-Host "  ┌─ Items that failed ───────────────────────────────────┐" -ForegroundColor Red
     foreach ($f in ($migrateRows | Where-Object { $_.Status -eq 'Failed' }) | Select-Object -First 15) {
         $label = "$($f.Collection)/$($f.Project)/$($f.Repo)"
@@ -728,10 +889,18 @@ if ($failCount -gt 0) {
         Write-Host "  │  ✗ $label" -ForegroundColor Red
         Write-Host "  │    $($f.Error)" -ForegroundColor DarkGray
     }
-    if ($failCount -gt 15) {
-        Write-Host "  │  ... and $($failCount - 15) more (see manifest for full list)" -ForegroundColor Red
+    if ($otherFailCount -gt 15) {
+        Write-Host "  │  ... and $($otherFailCount - 15) more (see manifest for full list)" -ForegroundColor Red
     }
     Write-Host "  └───────────────────────────────────────────────────────┘" -ForegroundColor Red
+    Write-Host ""
+}
+
+if ($failCount -gt 0) {
+    Write-Host "  To resume and skip failed items:" -ForegroundColor Cyan
+    Write-Host "    1. Open the manifest CSV: $manifestPath" -ForegroundColor DarkGray
+    Write-Host "    2. Change Status of items to skip from 'Failed'/'PathTooLong' to 'Skipped'" -ForegroundColor DarkGray
+    Write-Host "    3. Re-run with -ResumeManifest `"$manifestPath`"" -ForegroundColor DarkGray
     Write-Host ""
 }
 

@@ -235,6 +235,123 @@ function Get-AdoBuildDefinitions {
     }
 }
 
+# ─── Path Length Mitigation (Windows subst) ───────────────────────────────────
+
+function New-ShortClonePath {
+    <#
+    .SYNOPSIS
+        Creates a very short working path for git-tfs clone operations on Windows.
+        Uses subst to map an available drive letter to a short temp directory,
+        mitigating the 260-character MAX_PATH limit that git-tfs hits internally.
+    .DESCRIPTION
+        Even with core.longpaths=true and the registry LongPathsEnabled setting,
+        git-tfs may fail because it (and .NET Framework APIs it uses) still respect
+        the legacy 260-character limit during checkout operations.
+        This function creates a subst drive mapping so the effective working path
+        is as short as possible (e.g., "G:\r" instead of "C:\Users\Bob\output\my-repo").
+    .OUTPUTS
+        Hashtable with: DriveLetter, ShortPath, CleanupScriptBlock
+        Returns $null on non-Windows or if subst is unavailable.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$OutputDirectory,
+        [string]$LogFile
+    )
+
+    # Only applicable on Windows
+    if ($env:OS -ne 'Windows_NT') {
+        return $null
+    }
+
+    # Ensure the output directory exists as the subst target
+    if (-not (Test-Path $OutputDirectory)) {
+        New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
+    }
+
+    # Resolve to absolute path for subst
+    $resolvedDir = (Resolve-Path $OutputDirectory).Path
+
+    # Find an available drive letter (prefer letters near end of alphabet to avoid conflicts)
+    $preferredLetters = @('G', 'H', 'I', 'J', 'K', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z')
+    $usedDrives = @((Get-PSDrive -PSProvider FileSystem).Name)
+
+    $driveLetter = $null
+    foreach ($letter in $preferredLetters) {
+        if ($letter -notin $usedDrives) {
+            $driveLetter = $letter
+            break
+        }
+    }
+
+    if (-not $driveLetter) {
+        Write-MigrationLog -Message "No available drive letters for subst — skipping path shortening" -LogFile $LogFile -Level WARN
+        return $null
+    }
+
+    # Create the subst mapping
+    try {
+        $substResult = & subst "${driveLetter}:" $resolvedDir 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-MigrationLog -Message "subst failed: $substResult — continuing with original path" -LogFile $LogFile -Level WARN
+            return $null
+        }
+    }
+    catch {
+        Write-MigrationLog -Message "subst unavailable: $($_.Exception.Message) — continuing with original path" -LogFile $LogFile -Level WARN
+        return $null
+    }
+
+    Write-MigrationLog -Message "Mapped ${driveLetter}: → $resolvedDir (to shorten file paths for git-tfs)" -LogFile $LogFile -Level INFO
+
+    return @{
+        DriveLetter = $driveLetter
+        BasePath    = "${driveLetter}:"
+        OriginalDir = $resolvedDir
+    }
+}
+
+function Remove-ShortClonePath {
+    <#
+    .SYNOPSIS
+        Removes a subst drive mapping created by New-ShortClonePath.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter,
+        [string]$LogFile
+    )
+
+    try {
+        & subst "${DriveLetter}:" /d 2>$null
+        Write-MigrationLog -Message "Removed subst mapping ${DriveLetter}:" -LogFile $LogFile -Level INFO
+    }
+    catch {
+        Write-MigrationLog -Message "Warning: Could not remove subst ${DriveLetter}: — run 'subst ${DriveLetter}: /d' manually" -LogFile $LogFile -Level WARN
+    }
+}
+
+function Get-ShortRepoName {
+    <#
+    .SYNOPSIS
+        Generates a short temporary name for clone operations to minimize path length.
+        The repo is renamed to its proper name after cloning completes.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$FullRepoName
+    )
+
+    # Use a short hash-like name to keep the path minimal during clone
+    # Format: "r_" + first 6 chars, keeping total under 10 characters
+    $short = $FullRepoName.Substring(0, [Math]::Min(6, $FullRepoName.Length))
+    $short = $short -replace '[^a-zA-Z0-9]', ''
+    return "r_$short"
+}
+
 # ─── Git-TFS Helpers ──────────────────────────────────────────────────────────
 
 function Find-GitTfs {
@@ -534,6 +651,12 @@ function Get-FriendlyError {
     }
     if ($ErrorMessage -match 'git-tfs.*not found|git tfs.*not recognized') {
         return "The git-tfs tool is not installed. Run Install-Prerequisites.ps1 for installation instructions."
+    }
+    if ($ErrorMessage -match 'too long|path.*long|248 char|260 char|TF400959|PathTooLong|could not find a part of the path') {
+        return "File paths exceed the Windows 260-character limit. " +
+            "Try setting outputDirectory to a very short path (e.g. C:\M), " +
+            "or migrate specific subfolders instead of the entire repo. " +
+            "Deeply nested TFVC paths may need to be renamed in TFS first."
     }
 
     # Return original if no match

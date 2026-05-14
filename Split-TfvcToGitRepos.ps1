@@ -294,8 +294,20 @@ if (Test-Path $stagingPath) {
 # Enable long paths to handle deeply nested TFVC directories (Windows 248-char limit)
 try { & git config --global core.longpaths true 2>$null } catch { }
 
+# ── Path-length mitigation: use subst drive + short temp name during clone ──
+$substMapping = New-ShortClonePath -OutputDirectory $config.outputDirectory -LogFile $logFile
+$shortStagingName = Get-ShortRepoName -FullRepoName $stagingName
+
+if ($substMapping) {
+    $clonePath = Join-Path $substMapping.BasePath $shortStagingName
+    Write-MigrationLog -Message "Using shortened clone path: $clonePath (final: $stagingPath)" -LogFile $logFile
+}
+else {
+    $clonePath = $stagingPath
+}
+
 $tfsUrl = "$($config.adoServerUrl)/$Collection"
-$cloneArgs = "clone `"$tfsUrl`" `"$TfvcPath`" `"$stagingPath`""
+$cloneArgs = "clone `"$tfsUrl`" `"$TfvcPath`" `"$clonePath`""
 
 if ($HistoryDepth) {
     $cloneArgs += " --changeset=$HistoryDepth"
@@ -314,6 +326,15 @@ $cloneArgs += " --username=`"`" --password=`"$pat`""
 try {
     Invoke-GitTfs -Arguments $cloneArgs -LogFile $logFile
     Write-MigrationLog -Message "Staging clone complete" -LogFile $logFile -Level SUCCESS
+
+    # Move from short temp path to final staging path if subst was used
+    if ($substMapping -and $clonePath -ne $stagingPath) {
+        $actualClonePath = Join-Path $substMapping.OriginalDir $shortStagingName
+        if (Test-Path $actualClonePath) {
+            Move-Item -Path $actualClonePath -Destination $stagingPath -Force
+            Write-MigrationLog -Message "Moved staging clone from temp path to: $stagingPath" -LogFile $logFile
+        }
+    }
 }
 catch {
     Write-MigrationLog -Message "git-tfs clone failed: $($_.Exception.Message)" -LogFile $logFile -Level ERROR
@@ -322,6 +343,10 @@ catch {
 finally {
     Remove-Item Env:\GIT_TFS_USERNAME -ErrorAction SilentlyContinue
     Remove-Item Env:\GIT_TFS_PASSWORD -ErrorAction SilentlyContinue
+    # Always clean up subst mapping
+    if ($substMapping) {
+        Remove-ShortClonePath -DriveLetter $substMapping.DriveLetter -LogFile $logFile
+    }
 }
 
 # Clean git-tfs metadata from staging

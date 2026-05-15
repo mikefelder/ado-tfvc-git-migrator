@@ -250,7 +250,8 @@ if (Test-Path $outputPath) {
 # Enable long paths to handle deeply nested TFVC directories (Windows 248-char limit)
 try { & git config --global core.longpaths true 2>$null } catch { }
 
-$tfsUrl = "$($config.adoServerUrl)/$Collection"
+$encodedCollection = [Uri]::EscapeDataString($Collection)
+$tfsUrl = "$($config.adoServerUrl)/$encodedCollection"
 $depth = if ($HistoryDepth) { $HistoryDepth } elseif ($config.migrationDefaults.historyDepthLimit) { $config.migrationDefaults.historyDepthLimit } else { $null }
 
 # ── Path-length mitigation: use subst drive + short temp name during clone ──

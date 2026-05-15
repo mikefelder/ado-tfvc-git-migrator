@@ -306,7 +306,8 @@ else {
     $clonePath = $stagingPath
 }
 
-$tfsUrl = "$($config.adoServerUrl)/$Collection"
+$encodedCollection = [Uri]::EscapeDataString($Collection)
+$tfsUrl = "$($config.adoServerUrl)/$encodedCollection"
 $cloneArgs = "clone `"$tfsUrl`" `"$TfvcPath`" `"$clonePath`""
 
 if ($HistoryDepth) {

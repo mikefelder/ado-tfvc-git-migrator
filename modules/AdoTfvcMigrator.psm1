@@ -383,7 +383,9 @@ function Invoke-GitTfs {
         [Parameter(Mandatory)]
         [string]$Arguments,
         [string]$WorkingDirectory,
-        [string]$LogFile
+        [string]$LogFile,
+        [int]$TimeoutMinutes = 0,
+        [int]$StallTimeoutMinutes = 0
     )
 
     $cmd = "git tfs $Arguments"
@@ -406,26 +408,77 @@ function Invoke-GitTfs {
 
     $process = [System.Diagnostics.Process]::Start($psi)
 
-    # Stream output line-by-line so the user sees progress
-    $lastStatusTime = [datetime]::MinValue
-    $lineCount = 0
-    $allStdout = [System.Text.StringBuilder]::new()
-    $allStderr = [System.Text.StringBuilder]::new()
-
-    # Read stdout asynchronously to avoid deadlocks
+    # Read stdout/stderr asynchronously to avoid deadlocks
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
 
-    # Show a spinner while waiting
+    # Determine effective timeouts
+    $hasTimeout = $TimeoutMinutes -gt 0
+    $hasStallTimeout = $StallTimeoutMinutes -gt 0
+    $timeoutDeadline = if ($hasTimeout) { (Get-Date).AddMinutes($TimeoutMinutes) } else { [datetime]::MaxValue }
+    $lastOutputSize = 0
+    $lastOutputChangeTime = Get-Date
+
+    # Show a spinner with elapsed time, timeout, and stall detection
     $spinChars = @('|', '/', '-', '\')
     $spinIdx = 0
+    $timedOut = $false
+    $stalled = $false
+
     while (-not $process.HasExited) {
-        $elapsed = (Get-Date) - $process.StartTime
+        $now = Get-Date
+        $elapsed = $now - $process.StartTime
         $spinChar = $spinChars[$spinIdx % 4]
         $spinIdx++
-        Write-Host "`r  $spinChar  Converting... (elapsed: $($elapsed.ToString('hh\:mm\:ss')))  " -NoNewline -ForegroundColor DarkGray
+
+        # Build status line with timeout info
+        $statusLine = "  $spinChar  Converting... (elapsed: $($elapsed.ToString('hh\:mm\:ss'))"
+        if ($hasTimeout) {
+            $remaining = $timeoutDeadline - $now
+            if ($remaining.TotalSeconds -gt 0) {
+                $statusLine += " | timeout in: $($remaining.ToString('hh\:mm\:ss'))"
+            }
+        }
+        $statusLine += ")  "
+        Write-Host "`r$statusLine" -NoNewline -ForegroundColor DarkGray
+
+        # Check for hard timeout
+        if ($hasTimeout -and $now -ge $timeoutDeadline) {
+            $timedOut = $true
+            Write-MigrationLog -Message "TIMEOUT: git-tfs exceeded $TimeoutMinutes minute limit (elapsed: $($elapsed.ToString('hh\:mm\:ss'))). Killing process." -LogFile $LogFile -Level ERROR
+            try { $process.Kill() } catch { }
+            break
+        }
+
+        # Check for stall (no new output for StallTimeoutMinutes)
+        if ($hasStallTimeout) {
+            $currentSize = $stdoutTask.Result.Length 2>$null
+            if ($null -eq $currentSize) { $currentSize = 0 }
+            if ($currentSize -ne $lastOutputSize) {
+                $lastOutputSize = $currentSize
+                $lastOutputChangeTime = $now
+            }
+            elseif (($now - $lastOutputChangeTime).TotalMinutes -ge $StallTimeoutMinutes) {
+                $stalled = $true
+                Write-MigrationLog -Message "STALL DETECTED: No new output for $StallTimeoutMinutes minutes. Process appears stuck. Killing." -LogFile $LogFile -Level ERROR
+                try { $process.Kill() } catch { }
+                break
+            }
+        }
+
         Start-Sleep -Milliseconds 500
     }
+
+    if ($timedOut) {
+        Write-Host "`r  ✗  TIMED OUT after $TimeoutMinutes minutes.                              " -ForegroundColor Red
+        throw "git-tfs timed out after $TimeoutMinutes minutes. The repo may be too large or the server is unresponsive. Skipping this item."
+    }
+
+    if ($stalled) {
+        Write-Host "`r  ✗  STALLED — no progress for $StallTimeoutMinutes minutes.                " -ForegroundColor Red
+        throw "git-tfs stalled (no output for $StallTimeoutMinutes minutes). The process appeared stuck. Skipping this item."
+    }
+
     Write-Host "`r  ✓  Conversion process finished.                              " -ForegroundColor Green
 
     $stdout = $stdoutTask.GetAwaiter().GetResult()
@@ -510,7 +563,8 @@ function Invoke-Git {
     )
 
     $cmd = "git $Arguments"
-    Write-MigrationLog -Message "Running: $cmd" -LogFile $LogFile -Level INFO
+    $safeCmd = $cmd -replace '://:[^@]+@', '://***@'
+    Write-MigrationLog -Message "Running: $safeCmd" -LogFile $LogFile -Level INFO
 
     $prevDir = $null
     if ($WorkingDirectory) {

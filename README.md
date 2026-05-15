@@ -44,6 +44,14 @@ The 4-step interactive flow:
 3. **Preview** — shows exactly what will be migrated, extracted, archived, and skipped; saves a preview CSV
 4. **Confirm and run** — type `yes` to proceed; produces a manifest CSV and JSON report
 
+During batch execution, the migration runner now also:
+
+- Runs conversion in non-interactive mode so existing output folders are auto-cleaned (no blocking Y/N prompt)
+- Shows per-item progress as `[X / Y] (pct%) | ETA` and logs per-item duration
+- Applies timeout and stall detection to git-tfs operations (`timeoutMinutes` and `stallTimeoutMinutes`)
+- Marks successful rows in the spreadsheet Recommendation column as `completed`
+- Marks stuck items as `TimedOut`, logs them, and continues with the rest of the batch
+
 ```powershell
 # Interactive (recommended)
 ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json -Interactive
@@ -52,6 +60,12 @@ The 4-step interactive flow:
 ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
     -ExcelPath ./excel-docs/MDR-4ADO-AllProjects.xlsx `
     -TargetCollection "ModernApps" -TargetProject "Platform"
+
+# Direct with explicit timeout controls
+./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
+    -ExcelPath ./excel-docs/MDR-4ADO-AllProjects.xlsx `
+    -TargetCollection "ModernApps" -TargetProject "Platform" `
+    -TimeoutMinutes 120 -StallTimeoutMinutes 30
 ```
 
 ## Batch Archive (Option 10)
@@ -145,6 +159,8 @@ Key settings:
 | `github.enterpriseUrl` | GitHub Enterprise URL (e.g. `https://github.mcdermott.com`) |
 | `github.pat` | GitHub PAT with `repo` scope |
 | `github.defaultOrg` | Default GitHub organization for new repos |
+| `migrationDefaults.timeoutMinutes` | Optional hard timeout per conversion in minutes (example: `120`) |
+| `migrationDefaults.stallTimeoutMinutes` | Optional no-output stall timeout in minutes (example: `30`) |
 
 ## Directory Structure
 
@@ -212,7 +228,7 @@ Or pick option **[8]** from the main menu.
 
 ## Logging
 
-All operations write timestamped logs to `./logs/`. View recent logs from the main menu (option **[9]**) or browse the directory directly. Each script also supports `-Verbose` for detailed console output.
+All operations write timestamped logs to `./logs/`. View recent logs from the main menu (option **[9]**) or browse the directory directly. Each script also supports `-Verbose` for detailed console output. Git push command logging now redacts PAT credentials in authenticated URLs.
 
 ## Troubleshooting
 
@@ -227,7 +243,7 @@ Common issues and what to do:
 | "Cannot reach the ADO server" | Network/VPN issue | Check VPN connection and server URL in config |
 | "git-tfs not found" | Tool not installed | Run `Install-Prerequisites.ps1` for instructions |
 | "Missing Required Module: ImportExcel" | ImportExcel not installed | Run `Install-Module ImportExcel -Scope CurrentUser -Force` |
-| Conversion seems frozen | Large repo with lots of history | Normal — a spinner shows elapsed time; check logs for progress |
+| Conversion seems frozen | Large repo, blocked prompt, or no git-tfs output | Batch mode now auto-cleans output folders (no prompt), detects stalls/timeouts, marks item `TimedOut`, and continues. Tune `timeoutMinutes` / `stallTimeoutMinutes` if needed. |
 
 ### Resuming After Failures (Skip & Continue)
 
@@ -236,7 +252,7 @@ When the Excel-driven migration (`Invoke-ExcelMigration.ps1`) encounters a failu
 1. **Run the migration** — it produces a manifest CSV (e.g. `output/excel-migration-manifest-20260514-093000.csv`)
 2. **Open the manifest CSV** in Excel and review items with Status = `Failed` or `PathTooLong`
 3. **Change the Status** of any items you want to skip permanently to `Skipped`
-4. **Re-run with `-ResumeManifest`** — items marked `Success`, `Skipped`, or `PathTooLong` are automatically excluded:
+4. **Re-run with `-ResumeManifest`** — items marked `Success`, `Skipped`, or `PathTooLong` are automatically excluded. Items marked `TimedOut` are retried by default so they get another chance:
 
 ```powershell
 ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json -Interactive `

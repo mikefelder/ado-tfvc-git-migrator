@@ -553,6 +553,11 @@ $startTime = Get-Date
 $processedCount = 0
 $successCount = 0
 $failCount = 0
+$skippedStuckCount = 0
+
+# Resolve timeouts from config (can be overridden per-item in the future)
+$cfgTimeoutMin = if ($config.migrationDefaults.timeoutMinutes) { [int]$config.migrationDefaults.timeoutMinutes } else { 0 }
+$cfgStallMin = if ($config.migrationDefaults.stallTimeoutMinutes) { [int]$config.migrationDefaults.stallTimeoutMinutes } else { 0 }
 
 # Group migrations by Collection/Project/Repo to batch operations on same repo
 $grouped = $migrateRows | Group-Object -Property { "$($_.Collection)|$($_.Project)|$($_.Repo)" }
@@ -585,9 +590,19 @@ foreach ($group in $grouped) {
     # ── Full Repo Migration ──
     foreach ($item in $repoItems) {
         $processedCount++
+        $itemStart = Get-Date
+        $pctComplete = [math]::Round(($processedCount / $migrateRows.Count) * 100)
+        $etaStr = ''
+        if ($processedCount -gt 1) {
+            $avgSec = ((Get-Date) - $startTime).TotalSeconds / ($processedCount - 1)
+            $remainingSec = $avgSec * ($migrateRows.Count - $processedCount + 1)
+            $eta = (Get-Date).AddSeconds($remainingSec)
+            $etaStr = " | ETA: $($eta.ToString('HH:mm:ss'))"
+        }
         Write-Host ""
-        Write-Host "  Working on $processedCount of $($migrateRows.Count)..." -ForegroundColor Cyan
+        Write-Host "  [$processedCount / $($migrateRows.Count)] ($pctComplete%)$etaStr" -ForegroundColor Cyan
         Write-Host "    Migrating repo: $sourceCollection / $sourceProject / $sourceRepo" -ForegroundColor White
+        Write-MigrationLog -Message "[$processedCount/$($migrateRows.Count)] Starting: $sourceCollection/$sourceProject/$sourceRepo" -LogFile $logFile -Level INFO
 
         try {
             $needsConversion = $item.RepoType -eq 'TFVC'
@@ -602,7 +617,10 @@ foreach ($group in $grouped) {
                     -Collection $sourceCollection `
                     -ProjectName $sourceProject `
                     -TfvcPath "`$/$sourceProject" `
-                    -OutputRepoName $outputName
+                    -OutputRepoName $outputName `
+                    -NonInteractive `
+                    -TimeoutMinutes $cfgTimeoutMin `
+                    -StallTimeoutMinutes $cfgStallMin
             }
 
             Write-Host "    Moving to $TargetCollection / $TargetProject..." -ForegroundColor DarkGray
@@ -615,14 +633,16 @@ foreach ($group in $grouped) {
                 -TfvcPath "`$/$sourceProject/$sourceRepo" `
                 -TargetCollection $TargetCollection `
                 -TargetProject $TargetProject `
-                -TargetRepoName $outputName
+                -TargetRepoName $outputName `
+                -SkipConversion
 
+            $itemDuration = (Get-Date) - $itemStart
             $item.Status = 'Success'
             $successCount++
-            Write-Host "    ✓ Done" -ForegroundColor Green
-            Write-MigrationLog -Message "Successfully migrated '$sourceRepo'" -LogFile $logFile -Level SUCCESS
+            Write-Host "    ✓ Done ($($itemDuration.ToString('hh\:mm\:ss')))" -ForegroundColor Green
+            Write-MigrationLog -Message "Successfully migrated '$sourceRepo' in $($itemDuration.ToString('hh\:mm\:ss'))" -LogFile $logFile -Level SUCCESS
 
-            # Update spreadsheet column H to mark as done
+            # Update spreadsheet column H to mark as completed
             $rowsToMark = @($item.ExcelRow)
             # Include any duplicate rows for the same repo
             $skipRows | Where-Object {
@@ -636,10 +656,10 @@ foreach ($group in $grouped) {
                 $pkg = Open-ExcelPackage -Path $ExcelPath
                 $ws = $pkg.Workbook.Worksheets[$WorksheetName]
                 foreach ($excelRow in $rowsToMark) {
-                    $ws.Cells[$excelRow, $recommendationCol].Value = 'done'
+                    $ws.Cells[$excelRow, $recommendationCol].Value = 'completed'
                 }
-                Close-ExcelPackage $pkg -Save
-                Write-MigrationLog -Message "Updated $($rowsToMark.Count) Excel row(s) Recommendation -> 'done'" -LogFile $logFile -Level INFO
+                Close-ExcelPackage $pkg -SaveAs $ExcelPath
+                Write-MigrationLog -Message "Updated $($rowsToMark.Count) Excel row(s) Recommendation -> 'completed'" -LogFile $logFile -Level INFO
             }
             catch {
                 Write-MigrationLog -Message "Could not update Excel: $($_.Exception.Message)" -LogFile $logFile -Level WARN
@@ -666,6 +686,13 @@ foreach ($group in $grouped) {
                 Write-Host "    ✗ PATH TOO LONG — $sourceRepo" -ForegroundColor Red
                 Write-Host "      This repo contains files exceeding the Windows path limit." -ForegroundColor Yellow
             }
+            elseif ($errMsg -match 'timed out|stalled') {
+                $item.Status = 'TimedOut'
+                $item.Error = "Operation timed out or stalled. Skipped to unblock remaining items."
+                $skippedStuckCount++
+                Write-Host "    ✗ TIMED OUT / STUCK — $sourceRepo (skipping to next item)" -ForegroundColor Magenta
+                Write-MigrationLog -Message "SKIPPED (timeout/stall): '$sourceRepo' — moving on to next item" -LogFile $logFile -Level WARN
+            }
             else {
                 $item.Status = 'Failed'
                 $item.Error = $friendlyErr
@@ -685,14 +712,24 @@ foreach ($group in $grouped) {
 
         foreach ($item in $folderItems) {
             $processedCount++
+            $itemStart = Get-Date
+            $pctComplete = [math]::Round(($processedCount / $migrateRows.Count) * 100)
+            $etaStr = ''
+            if ($processedCount -gt 1) {
+                $avgSec = ((Get-Date) - $startTime).TotalSeconds / ($processedCount - 1)
+                $remainingSec = $avgSec * ($migrateRows.Count - $processedCount + 1)
+                $eta = (Get-Date).AddSeconds($remainingSec)
+                $etaStr = " | ETA: $($eta.ToString('HH:mm:ss'))"
+            }
             $folderName = $item.Folder
             $folderOutputName = $item.NewRepoName
             $folderOutputPath = Join-Path $config.outputDirectory $folderOutputName
             $folderTfvcPath = "`$/$sourceProject/$folderName"
 
             Write-Host ""
-            Write-Host "  Working on $processedCount of $($migrateRows.Count)..." -ForegroundColor Cyan
+            Write-Host "  [$processedCount / $($migrateRows.Count)] ($pctComplete%)$etaStr" -ForegroundColor Cyan
             Write-Host "    Extracting folder: $folderTfvcPath → '$folderOutputName'" -ForegroundColor White
+            Write-MigrationLog -Message "[$processedCount/$($migrateRows.Count)] Starting folder: $folderTfvcPath" -LogFile $logFile -Level INFO
 
             # Pre-clean output directory
             if (Test-Path $folderOutputPath) {
@@ -706,7 +743,10 @@ foreach ($group in $grouped) {
                     -Collection $sourceCollection `
                     -ProjectName $sourceProject `
                     -TfvcPath $folderTfvcPath `
-                    -OutputRepoName $folderOutputName
+                    -OutputRepoName $folderOutputName `
+                    -NonInteractive `
+                    -TimeoutMinutes $cfgTimeoutMin `
+                    -StallTimeoutMinutes $cfgStallMin
 
                 Write-Host "    ✓ Extracted '$folderName'" -ForegroundColor Green
                 Write-MigrationLog -Message "Successfully extracted '$folderName' as '$folderOutputName'" -LogFile $logFile -Level SUCCESS
@@ -723,6 +763,13 @@ foreach ($group in $grouped) {
                     Write-Host "    ✗ PATH TOO LONG — $folderName" -ForegroundColor Red
                     Write-Host "      This folder contains files with paths exceeding the Windows limit." -ForegroundColor Yellow
                     Write-Host "      Mark this item as 'Skipped' in the manifest to exclude it from future runs." -ForegroundColor Yellow
+                }
+                elseif ($errMsg -match 'timed out|stalled') {
+                    $item.Status = 'TimedOut'
+                    $item.Error = "Operation timed out or stalled. Skipped to unblock remaining items."
+                    $skippedStuckCount++
+                    Write-Host "    ✗ TIMED OUT / STUCK — $folderName (skipping to next item)" -ForegroundColor Magenta
+                    Write-MigrationLog -Message "SKIPPED (timeout/stall): folder '$folderName' — moving on" -LogFile $logFile -Level WARN
                 }
                 else {
                     $item.Status = 'Failed'
@@ -746,20 +793,22 @@ foreach ($group in $grouped) {
                     -TfvcPath $folderTfvcPath `
                     -TargetCollection $TargetCollection `
                     -TargetProject $TargetProject `
-                    -TargetRepoName $folderOutputName
+                    -TargetRepoName $folderOutputName `
+                    -SkipConversion
 
+                $itemDuration = (Get-Date) - $itemStart
                 $item.Status = 'Success'
                 $successCount++
-                Write-Host "    ✓ Done" -ForegroundColor Green
-                Write-MigrationLog -Message "Successfully moved '$folderOutputName' to $TargetCollection/$TargetProject" -LogFile $logFile -Level SUCCESS
+                Write-Host "    ✓ Done ($($itemDuration.ToString('hh\:mm\:ss')))" -ForegroundColor Green
+                Write-MigrationLog -Message "Successfully moved '$folderOutputName' to $TargetCollection/$TargetProject in $($itemDuration.ToString('hh\:mm\:ss'))" -LogFile $logFile -Level SUCCESS
 
-                # Update spreadsheet column H to mark as done
+                # Update spreadsheet column H to mark as completed
                 try {
                     $pkg = Open-ExcelPackage -Path $ExcelPath
                     $ws = $pkg.Workbook.Worksheets[$WorksheetName]
-                    $ws.Cells[$item.ExcelRow, $recommendationCol].Value = 'done'
-                    Close-ExcelPackage $pkg -Save
-                    Write-MigrationLog -Message "Updated Excel row $($item.ExcelRow) Recommendation -> 'done'" -LogFile $logFile -Level INFO
+                    $ws.Cells[$item.ExcelRow, $recommendationCol].Value = 'completed'
+                    Close-ExcelPackage $pkg -SaveAs $ExcelPath
+                    Write-MigrationLog -Message "Updated Excel row $($item.ExcelRow) Recommendation -> 'completed'" -LogFile $logFile -Level INFO
                 }
                 catch {
                     Write-MigrationLog -Message "Could not update Excel row $($item.ExcelRow): $($_.Exception.Message)" -LogFile $logFile -Level WARN
@@ -818,19 +867,20 @@ $allActions | Select-Object RowNo, Collection, Project, Repo, Folder, NewRepoNam
 # Write JSON report
 $reportPath = Join-Path $config.outputDirectory "excel-migration-report-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
 $report = @{
-    startTime        = $startTime.ToString('o')
-    endTime          = (Get-Date).ToString('o')
-    duration         = $totalDuration.ToString('hh\:mm\:ss')
-    excelFile        = $ExcelPath
-    worksheet        = $WorksheetName
-    target           = "$TargetCollection/$TargetProject"
-    totalRows        = $excelData.Count
-    migrateCount     = $migrateRows.Count
-    archiveCount     = $archiveRows.Count
-    skipCount        = $skipRows.Count
-    successCount     = $successCount
-    failCount        = $failCount
-    pathTooLongCount = $pathTooLongCount
+    startTime           = $startTime.ToString('o')
+    endTime             = (Get-Date).ToString('o')
+    duration            = $totalDuration.ToString('hh\:mm\:ss')
+    excelFile           = $ExcelPath
+    worksheet           = $WorksheetName
+    target              = "$TargetCollection/$TargetProject"
+    totalRows           = $excelData.Count
+    migrateCount        = $migrateRows.Count
+    archiveCount        = $archiveRows.Count
+    skipCount           = $skipRows.Count
+    successCount        = $successCount
+    failCount           = $failCount
+    pathTooLongCount    = $pathTooLongCount
+    timedOutCount       = $skippedStuckCount
 }
 $report | ConvertTo-Json -Depth 5 | Out-File $reportPath -Encoding utf8
 
@@ -848,10 +898,14 @@ Write-Host "  Time elapsed:  $($totalDuration.ToString('hh\:mm\:ss'))" -Foregrou
 Write-Host ""
 
 $pathTooLongCount = @($migrateRows | Where-Object { $_.Status -eq 'PathTooLong' }).Count
-$otherFailCount = $failCount - $pathTooLongCount
+$timedOutCount = @($migrateRows | Where-Object { $_.Status -eq 'TimedOut' }).Count
+$otherFailCount = $failCount - $pathTooLongCount - $timedOutCount
 
 Write-Host "  Results:" -ForegroundColor White
 Write-Host "    ✓ Successful:    $successCount" -ForegroundColor Green
+if ($timedOutCount -gt 0) {
+    Write-Host "    ⏱ Timed out:    $timedOutCount (stuck or exceeded timeout — skipped)" -ForegroundColor Magenta
+}
 if ($pathTooLongCount -gt 0) {
     Write-Host "    ✗ Path too long: $pathTooLongCount (file paths exceed Windows limit)" -ForegroundColor Magenta
 }
@@ -861,6 +915,23 @@ if ($otherFailCount -gt 0) {
 Write-Host "    ○ Archived:      $($archiveRows.Count) (not migrated)" -ForegroundColor Yellow
 Write-Host "    ○ Skipped:       $($skipRows.Count)" -ForegroundColor DarkGray
 Write-Host ""
+
+# Show Timed-out items
+if ($timedOutCount -gt 0) {
+    Write-Host "  ┌─ Items that timed out / appeared stuck ───────────────┐" -ForegroundColor Magenta
+    foreach ($f in ($migrateRows | Where-Object { $_.Status -eq 'TimedOut' })) {
+        $label = "$($f.Collection)/$($f.Project)/$($f.Repo)"
+        if ($f.Folder) { $label += "/$($f.Folder)" }
+        Write-Host "  │  ⏱ $label" -ForegroundColor Magenta
+    }
+    Write-Host "  │" -ForegroundColor Magenta
+    Write-Host "  │  These items exceeded the timeout or stalled with no" -ForegroundColor Magenta
+    Write-Host "  │  progress. They were skipped to unblock the batch." -ForegroundColor Magenta
+    Write-Host "  │  You can retry them individually or increase the" -ForegroundColor Magenta
+    Write-Host "  │  timeoutMinutes / stallTimeoutMinutes in your config." -ForegroundColor Magenta
+    Write-Host "  └───────────────────────────────────────────────────────┘" -ForegroundColor Magenta
+    Write-Host ""
+}
 
 # Show PathTooLong items with specific guidance
 if ($pathTooLongCount -gt 0) {

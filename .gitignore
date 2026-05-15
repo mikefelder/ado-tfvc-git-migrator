@@ -13,3 +13,7 @@ Thumbs.db
 .vs/
 .vscode/
 *.swp
+
+# files
+excel-docs/*.xlsx
+May14-15-Log

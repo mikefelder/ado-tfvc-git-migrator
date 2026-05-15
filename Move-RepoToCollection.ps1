@@ -70,6 +70,14 @@ param(
 
     [int]$HistoryDepth,
 
+    [switch]$SkipConversion,
+
+    [switch]$NonInteractive,
+
+    [int]$TimeoutMinutes,
+
+    [int]$StallTimeoutMinutes,
+
     [switch]$SkipTargetRepoCreation
 )
 
@@ -216,22 +224,38 @@ Write-MigrationLog -Message "Source and target connections verified" -LogFile $l
 
 # ─── Step 1: Convert TFVC to Git ──────────────────────────────────────────────
 
-Write-MigrationLog -Message "Step 1: Converting TFVC to Git" -LogFile $logFile -Level INFO
-
-$convertParams = @{
-    ConfigPath     = $ConfigPath
-    Collection     = $SourceCollection
-    ProjectName    = $SourceProject
-    TfvcPath       = $TfvcPath
-    OutputRepoName = $TargetRepoName
-}
-if ($HistoryDepth) {
-    $convertParams.HistoryDepth = $HistoryDepth
-}
-
-& "$PSScriptRoot/Convert-TfvcToGit.ps1" @convertParams
-
 $localRepoPath = Join-Path $config.outputDirectory $TargetRepoName
+
+if ($SkipConversion) {
+    Write-MigrationLog -Message "Step 1: Skipping conversion (already done upstream)" -LogFile $logFile -Level INFO
+}
+else {
+    Write-MigrationLog -Message "Step 1: Converting TFVC to Git" -LogFile $logFile -Level INFO
+
+    $convertParams = @{
+        ConfigPath     = $ConfigPath
+        Collection     = $SourceCollection
+        ProjectName    = $SourceProject
+        TfvcPath       = $TfvcPath
+        OutputRepoName = $TargetRepoName
+    }
+    if ($HistoryDepth) {
+        $convertParams.HistoryDepth = $HistoryDepth
+    }
+    if ($NonInteractive) {
+        $convertParams.NonInteractive = $true
+    }
+    if ($TimeoutMinutes) {
+        $convertParams.TimeoutMinutes = $TimeoutMinutes
+    }
+    if ($StallTimeoutMinutes) {
+        $convertParams.StallTimeoutMinutes = $StallTimeoutMinutes
+    }
+
+    & "$PSScriptRoot/Convert-TfvcToGit.ps1" @convertParams
+
+    Write-MigrationLog -Message "Conversion complete" -LogFile $logFile -Level SUCCESS
+}
 
 if (-not (Test-Path (Join-Path $localRepoPath '.git'))) {
     throw "Conversion failed — no Git repo found at $localRepoPath"

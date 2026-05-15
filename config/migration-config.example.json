@@ -24,6 +24,8 @@
     "migrationDefaults": {
         "includeHistory": true,
         "historyDepthLimit": null,
+        "timeoutMinutes": 120,
+        "stallTimeoutMinutes": 30,
         "excludePatterns": [
             "**/bin/**",
             "**/obj/**",

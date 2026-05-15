@@ -60,7 +60,13 @@ param(
 
     [int]$HistoryDepth,
 
-    [switch]$NoCleanup
+    [switch]$NoCleanup,
+
+    [switch]$NonInteractive,
+
+    [int]$TimeoutMinutes = 0,
+
+    [int]$StallTimeoutMinutes = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -218,18 +224,25 @@ $outputPath = Join-Path $config.outputDirectory $OutputRepoName
 
 if (Test-Path $outputPath) {
     Write-MigrationLog -Message "Output path already exists: $outputPath" -LogFile $logFile -Level WARN
-    Write-Host ""
-    Write-Host "  A previous conversion already exists at: $outputPath" -ForegroundColor Yellow
-    Write-Host "  To start fresh, the existing folder needs to be removed." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  Remove it and continue? [Y/n]: " -ForegroundColor Yellow -NoNewline
-    $removeConfirm = Read-Host
-    if ($removeConfirm.Trim() -match '^[Nn]') {
-        Write-Host "  Cancelled. Existing output left in place." -ForegroundColor Yellow
-        return
+    if ($NonInteractive) {
+        # Batch mode: auto-remove without prompting
+        Remove-Item -Recurse -Force $outputPath
+        Write-MigrationLog -Message "Auto-removed existing directory (non-interactive mode)" -LogFile $logFile
     }
-    Remove-Item -Recurse -Force $outputPath
-    Write-MigrationLog -Message "Removed existing directory" -LogFile $logFile
+    else {
+        Write-Host ""
+        Write-Host "  A previous conversion already exists at: $outputPath" -ForegroundColor Yellow
+        Write-Host "  To start fresh, the existing folder needs to be removed." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  Remove it and continue? [Y/n]: " -ForegroundColor Yellow -NoNewline
+        $removeConfirm = Read-Host
+        if ($removeConfirm.Trim() -match '^[Nn]') {
+            Write-Host "  Cancelled. Existing output left in place." -ForegroundColor Yellow
+            return
+        }
+        Remove-Item -Recurse -Force $outputPath
+        Write-MigrationLog -Message "Removed existing directory" -LogFile $logFile
+    }
 }
 
 # ─── Build git-tfs clone command ───────────────────────────────────────────────
@@ -276,7 +289,12 @@ Write-Host "  ┌─────────────────────
 Write-Host "  │  Converting TFVC to Git — this may take a while...     │" -ForegroundColor Cyan
 Write-Host "  │                                                         │" -ForegroundColor Cyan
 Write-Host "  │  • Large repos can take 30+ minutes                    │" -ForegroundColor Cyan
-Write-Host "  │  • The screen may appear idle — that's normal           │" -ForegroundColor Cyan
+if ($TimeoutMinutes -gt 0) {
+    Write-Host "  │  • Timeout: $($TimeoutMinutes) minutes (will skip if exceeded)".PadRight(57) + "│" -ForegroundColor Cyan
+}
+if ($StallTimeoutMinutes -gt 0) {
+    Write-Host "  │  • Stall detection: $($StallTimeoutMinutes) min of no progress = skip".PadRight(57) + "│" -ForegroundColor Cyan
+}
 Write-Host "  │  • Progress is being written to the log file            │" -ForegroundColor Cyan
 Write-Host "  │  • Do NOT close this window                             │" -ForegroundColor Cyan
 Write-Host "  └─────────────────────────────────────────────────────────┘" -ForegroundColor Cyan
@@ -285,8 +303,16 @@ Write-Host "" -ForegroundColor White
 Write-MigrationLog -Message "Starting git-tfs clone..." -LogFile $logFile -Level INFO
 $cloneStart = Get-Date
 
+# Resolve effective timeouts from params or config
+$effectiveTimeout = if ($TimeoutMinutes -gt 0) { $TimeoutMinutes }
+    elseif ($config.migrationDefaults.timeoutMinutes) { [int]$config.migrationDefaults.timeoutMinutes }
+    else { 0 }
+$effectiveStallTimeout = if ($StallTimeoutMinutes -gt 0) { $StallTimeoutMinutes }
+    elseif ($config.migrationDefaults.stallTimeoutMinutes) { [int]$config.migrationDefaults.stallTimeoutMinutes }
+    else { 0 }
+
 try {
-    Invoke-GitTfs -Arguments $cloneArgs -LogFile $logFile
+    Invoke-GitTfs -Arguments $cloneArgs -LogFile $logFile -TimeoutMinutes $effectiveTimeout -StallTimeoutMinutes $effectiveStallTimeout
     $cloneDuration = (Get-Date) - $cloneStart
     Write-MigrationLog -Message "git-tfs clone completed in $($cloneDuration.ToString('hh\:mm\:ss'))" -LogFile $logFile -Level SUCCESS
 

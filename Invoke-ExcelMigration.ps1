@@ -77,6 +77,57 @@ param(
 $ErrorActionPreference = 'Stop'
 Import-Module "$PSScriptRoot/modules/AdoTfvcMigrator.psm1" -Force
 
+function Resolve-TfvcFolderPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourceProject,
+        [Parameter(Mandatory)]
+        [string]$SourceRepo,
+        [Parameter(Mandatory)]
+        [string]$FolderName
+    )
+
+    $normalized = ($FolderName -replace '\\', '/').Trim()
+    $normalized = $normalized.Trim('/')
+
+    if ($normalized -match '^\$/') {
+        return $normalized
+    }
+
+    if ($normalized -like "$SourceProject/*") {
+        return "`$/$normalized"
+    }
+
+    if ($normalized -like "$SourceRepo/*") {
+        return "`$/$SourceProject/$normalized"
+    }
+
+    return "`$/$SourceProject/$SourceRepo/$normalized"
+}
+
+function Test-TfvcPathExists {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerUrl,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$Pat,
+        [Parameter(Mandatory)]
+        [string]$TfvcPath
+    )
+
+    try {
+        $items = @(Get-TfvcItems -ServerUrl $ServerUrl -Collection $Collection -Pat $Pat -ScopePath $TfvcPath -RecursionLevel 1)
+        return [bool]($items | Where-Object { $_.path -eq $TfvcPath } | Select-Object -First 1)
+    }
+    catch {
+        return $false
+    }
+}
+
 # ─── Check for ImportExcel Module ──────────────────────────────────────────────
 
 if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
@@ -607,8 +658,13 @@ foreach ($group in $grouped) {
         try {
             $needsConversion = $item.RepoType -eq 'TFVC'
             $outputName = $sourceRepo -replace '[^a-zA-Z0-9_-]', '-'
+            $repoTfvcPath = "`$/$sourceProject/$sourceRepo"
 
             if ($needsConversion) {
+                if (-not (Test-TfvcPathExists -ServerUrl $config.adoServerUrl -Collection $sourceCollection -Pat $pat -TfvcPath $repoTfvcPath)) {
+                    throw "TFVC path not found: $repoTfvcPath"
+                }
+
                 Write-Host "    Converting from TFVC to Git format..." -ForegroundColor DarkGray
                 Write-MigrationLog -Message "Converting TFVC repo '$sourceRepo' to Git" -LogFile $logFile -Level INFO
 
@@ -616,11 +672,16 @@ foreach ($group in $grouped) {
                     -ConfigPath $ConfigPath `
                     -Collection $sourceCollection `
                     -ProjectName $sourceProject `
-                    -TfvcPath "`$/$sourceProject" `
+                    -TfvcPath $repoTfvcPath `
                     -OutputRepoName $outputName `
                     -NonInteractive `
                     -TimeoutMinutes $cfgTimeoutMin `
                     -StallTimeoutMinutes $cfgStallMin
+            }
+
+            $localRepoPath = Join-Path $config.outputDirectory $outputName
+            if (-not (Test-Path (Join-Path $localRepoPath '.git'))) {
+                throw "Local converted repo not found at $localRepoPath. Conversion may have been skipped or failed earlier."
             }
 
             Write-Host "    Moving to $TargetCollection / $TargetProject..." -ForegroundColor DarkGray
@@ -724,7 +785,19 @@ foreach ($group in $grouped) {
             $folderName = $item.Folder
             $folderOutputName = $item.NewRepoName
             $folderOutputPath = Join-Path $config.outputDirectory $folderOutputName
-            $folderTfvcPath = "`$/$sourceProject/$folderName"
+            $folderTfvcPath = Resolve-TfvcFolderPath -SourceProject $sourceProject -SourceRepo $sourceRepo -FolderName $folderName
+
+            if (-not (Test-TfvcPathExists -ServerUrl $config.adoServerUrl -Collection $sourceCollection -Pat $pat -TfvcPath $folderTfvcPath)) {
+                $item.Status = 'Failed'
+                $item.Error = "TFVC path not found: $folderTfvcPath"
+                $failCount++
+                Write-Host ""
+                Write-Host "  [$processedCount / $($migrateRows.Count)] ($pctComplete%)$etaStr" -ForegroundColor Cyan
+                Write-Host "    Extracting folder: $folderTfvcPath → '$folderOutputName'" -ForegroundColor White
+                Write-Host "    ✗ Failed: TFVC path not found" -ForegroundColor Red
+                Write-MigrationLog -Message "Failed to extract '$folderName': TFVC path not found ($folderTfvcPath)" -LogFile $logFile -Level ERROR
+                continue
+            }
 
             Write-Host ""
             Write-Host "  [$processedCount / $($migrateRows.Count)] ($pctComplete%)$etaStr" -ForegroundColor Cyan
@@ -783,6 +856,15 @@ foreach ($group in $grouped) {
             }
 
             # Move to target collection/project
+            if (-not (Test-Path (Join-Path $folderOutputPath '.git'))) {
+                $item.Status = 'Failed'
+                $item.Error = "Local converted repo not found at $folderOutputPath. Conversion may have been skipped or failed earlier."
+                $failCount++
+                Write-Host "    ✗ Failed: $($item.Error)" -ForegroundColor Red
+                Write-MigrationLog -Message "Failed to move '$folderName': $($item.Error)" -LogFile $logFile -Level ERROR
+                continue
+            }
+
             Write-Host "    Moving '$folderOutputName' to $TargetCollection / $TargetProject..." -ForegroundColor White
 
             try {

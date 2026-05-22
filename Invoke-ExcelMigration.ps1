@@ -351,8 +351,8 @@ foreach ($row in $excelData) {
         continue
     }
 
-    # Exclude BuildProcessTemplates
-    if ($folderName -eq 'BuildProcessTemplates') {
+    # Exclude BuildProcessTemplates (matches bare name or any TFVC path ending in /BuildProcessTemplates)
+    if ($folderName -eq 'BuildProcessTemplates' -or $folderName -like '*/BuildProcessTemplates') {
         $entry.Action = 'Skip'
         $entry.Reason = 'BuildProcessTemplates (system folder, excluded automatically)'
         $entry.Status = 'Skipped'

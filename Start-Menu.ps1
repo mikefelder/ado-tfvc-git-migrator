@@ -103,6 +103,10 @@ while ($true) {
     Write-Host "  [9]  Batch Migrate         Migrate all repos from the MDR spreadsheet" -ForegroundColor White
     Write-Host "  [10] Batch Archive         Archive repos from the Dalptfs01 spreadsheet" -ForegroundColor White
     Write-Host ""
+    Write-Host "  ── Cross-Server / Org ─────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  [12] Mirror Git Collection Mirror every Git repo from one collection/org to another" -ForegroundColor White
+    Write-Host "  [13] Migrate ONE Project   Pick one source project, see its status, mirror it to MDR-GAMS-ADO" -ForegroundColor White
+    Write-Host ""
     Write-Host "  ── Other ──────────────────────────────────────────────" -ForegroundColor DarkGray
     Write-Host "  [11] View Logs             Open the logs folder" -ForegroundColor White
     Write-Host "  [0]  Exit" -ForegroundColor DarkGray
@@ -248,6 +252,20 @@ while ($true) {
             }
             Pause-ForUser
         }
+        '12' {
+            # Mirror Git Collection (cross-server / org)
+            if (-not (Test-ConfigReady)) { continue }
+            Show-Banner
+            & "$PSScriptRoot/Mirror-AdoCollection.ps1" -ConfigPath $ConfigPath -Interactive
+            Pause-ForUser
+        }
+        '13' {
+            # Migrate ONE project (interactive picker with status against target)
+            if (-not (Test-ConfigReady)) { continue }
+            Show-Banner
+            & "$PSScriptRoot/Invoke-ProjectMigration.ps1" -ConfigPath $ConfigPath
+            Pause-ForUser
+        }
         '0' {
             Write-Host ""
             Write-Host "  Goodbye!" -ForegroundColor Cyan
@@ -255,7 +273,7 @@ while ($true) {
             return
         }
         default {
-            Write-Host "  Invalid option. Please enter a number 0-11." -ForegroundColor Red
+            Write-Host "  Invalid option. Please enter a number 0-13." -ForegroundColor Red
             Start-Sleep -Seconds 1
         }
     }

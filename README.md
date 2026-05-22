@@ -1,4 +1,4 @@
-so when # ADO TFVC-to-Git Migrator
+# ADO TFVC-to-Git Migrator
 
 A PowerShell toolkit for migrating TFVC repositories from Azure DevOps Server 2022 to Git and GitHub Enterprise. Every script has a guided **interactive mode** with menus, so no command-line experience is required.
 
@@ -25,6 +25,8 @@ This launches a menu-driven interface:
 | **9** | Batch Migrate | Read the MDR spreadsheet and migrate/split repos in bulk |
 | **10** | Batch Archive | Archive repos from the Dalptfs01 spreadsheet |
 | **11** | View Logs | Open the logs folder |
+| **12** | Mirror Git Collection | Mirror every Git repo from one collection/org to another (cross-server supported) |
+| **13** | Migrate ONE Project | Interactive picker — see per-project migration status, pick one, mirror it to `MDR-GAMS-ADO` |
 
 No need to remember parameter names or edit JSON by hand.
 
@@ -76,6 +78,139 @@ Reads the **Dalptfs01-Collections-MikeFelder.xlsx** spreadsheet and archives rep
 ./Invoke-ArchiveRepos.ps1 -ConfigPath ./config/migration-config.json -Interactive
 ```
 
+## Mirror Git Collection — Cross-Server / Org (Option 12)
+
+Mirrors **every project and Git repository** from a source ADO collection to a target collection, preserving names. The flagship use case is the on-prem ADO Server 2022 collection `GAMS-GIT-Repos` mirrored to the Azure DevOps Services organisation `MDR-GAMS-ADO`, but it works for any source/target defined in the config.
+
+For each source project:
+
+1. The matching target project is **auto-created** if it doesn't already exist (process template defaults to **Agile**).
+2. Every Git repo in the source project is mirrored to the target project of the same name using `git clone --mirror` followed by `git push --mirror`. **All branches, tags, and notes** come across.
+3. Existing target repos receive a force-push of all refs.
+
+### Configuration for a cross-server target
+
+Add the target organisation as another collection entry, with an explicit `serverUrl` pointing at Azure DevOps Services. The collection key becomes the org name:
+
+```jsonc
+{
+    "adoServerUrl": "https://ado.mcdermott.com",
+    "collections": {
+        "GAMS-GIT-Repos": {
+            "pat": "<source on-prem PAT>",
+            "description": "Source — on-prem ADO 2022 collection"
+        },
+        "MDR-GAMS-ADO": {
+            "pat": "<target ADO Services PAT>",
+            "serverUrl": "https://dev.azure.com",
+            "description": "Target — Azure DevOps Services organisation"
+        }
+    }
+}
+```
+
+`serverUrl` is optional per collection. When set it overrides the top-level `adoServerUrl` for that one collection — enabling cross-server mirrors without disturbing any other workflow.
+
+### PAT scopes required on the target
+
+The **target** PAT must include both:
+
+- **Code** — Read & Write (push refs into existing/new repos)
+- **Project and Team** — Read, Write & Manage (auto-create missing target projects)
+
+The source PAT only needs **Code (Read)**.
+
+### Run it
+
+```powershell
+# Interactive — pick source/target, preview, then confirm
+./Mirror-AdoCollection.ps1 -ConfigPath ./config/migration-config.json -Interactive
+
+# Direct — on-prem collection -> ADO Services org
+./Mirror-AdoCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection GAMS-GIT-Repos -TargetCollection MDR-GAMS-ADO -Force
+
+# Preview-only — just write the manifest CSV, do nothing else
+./Mirror-AdoCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection GAMS-GIT-Repos -TargetCollection MDR-GAMS-ADO -PreviewOnly
+
+# Dry run — walk the whole flow, ensure target projects exist, but skip clones/pushes
+./Mirror-AdoCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection GAMS-GIT-Repos -TargetCollection MDR-GAMS-ADO -DryRun -Force
+
+# Filter to a subset of source projects
+./Mirror-AdoCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection GAMS-GIT-Repos -TargetCollection MDR-GAMS-ADO `
+    -IncludeProjects 'AppA','AppB' -Force
+
+# Filter to a single source project (also used by option [13])
+./Mirror-AdoCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection GAMS-GIT-Repos -TargetCollection MDR-GAMS-ADO `
+    -SourceProject 'AppA' -Force
+
+# Resume after a partial run — repos with Status=Success in the manifest are skipped
+./Mirror-AdoCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection GAMS-GIT-Repos -TargetCollection MDR-GAMS-ADO `
+    -ResumeManifest ./output/mirror-MANIFEST-20260520-093011.csv -Force
+```
+
+### Outputs
+
+Every run writes three files under `outputDirectory`:
+
+- `mirror-PREVIEW-<timestamp>.csv` — list of every source repo to be mirrored
+- `mirror-MANIFEST-<timestamp>.csv` — per-repo result (`Success`/`Skipped`/`Failed`/`PathTooLong`/`TimedOut`/`DryRun`) with duration in seconds; flushed after every repo so a crash never loses progress
+- `mirror-REPORT-<timestamp>.json` — final summary with totals and file paths
+
+Temporary bare clones live under `./output/mirror-cache/` (override with `-WorkingDirectory`). They're deleted on success unless you pass `-KeepCache`.
+
+## Migrate ONE Project — Interactive Picker (Option 13)
+
+When you only want to mirror a **single project** at a time (instead of the whole collection), pick option **[13]** from the menu — or run [`Invoke-ProjectMigration.ps1`](Invoke-ProjectMigration.ps1) directly. It shows a live, color-coded table of every project in the source collection and its current migration status against the target (`MDR-GAMS-ADO` by default):
+
+| Symbol | Color | Meaning |
+|---|---|---|
+| `[OK]` | Green | Migrated — every source repo exists in the target project |
+| `[~]`  | Yellow | Partial — target exists but is missing *N* repos |
+| `[ ]`  | Red | Not migrated — target project doesn't exist (or has none of the source repos) |
+| `[--]` | Gray | Empty — source project has no Git repos to mirror |
+
+Each row also shows the **Src / Tgt** repo counts so you can see at a glance how much work remains.
+
+### Keyboard controls
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` / `PageUp` / `PageDown` / `Home` / `End` | Move the cursor |
+| `1`–`9`… then `Enter` | Jump to a project by its row number (numbering is stable even when the list is filtered) |
+| `Backspace` | Erase typed digits |
+| `A` | Toggle the **hide already-migrated** filter |
+| `R` | Refresh status from the server |
+| `Q` / `Esc` | Cancel |
+| `Enter` | Confirm the highlighted project and start the mirror |
+
+### Source / target selection
+
+- If the config contains a collection named **`MDR-GAMS-ADO`**, it is auto-selected as the target.
+- If exactly one other collection is configured, it is auto-selected as the source.
+- Otherwise you get the standard interactive collection picker for whichever side is missing.
+
+### Run it
+
+```powershell
+# Interactive — the normal way (also reachable via Start-Menu option [13])
+./Invoke-ProjectMigration.ps1 -ConfigPath ./config/migration-config.json
+
+# Dry run — show the picker, walk the mirror flow, but skip clones/pushes
+./Invoke-ProjectMigration.ps1 -ConfigPath ./config/migration-config.json -DryRun
+
+# Fully scripted — pick the project up front, skip the final confirm prompt
+./Invoke-ProjectMigration.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection GAMS-GIT-Repos -TargetCollection MDR-GAMS-ADO -Force
+```
+
+Under the hood this hands off to [`Mirror-AdoCollection.ps1`](Mirror-AdoCollection.ps1) with `-SourceProject <name>`, so you get the same nested progress bars, rollup summary table, and manifest CSV as a full-collection mirror — just scoped to one project.
+
 ## Getting Started (Command-Line)
 
 If you prefer scripting or automation, every script also accepts direct parameters:
@@ -120,6 +255,8 @@ cp config/migration-config.example.json config/migration-config.json
 | `Convert-TfvcToGit.ps1` | Converts a TFVC repo to a Git repo via git-tfs | `-Interactive` |
 | `Split-TfvcToGitRepos.ps1` | Splits TFVC subfolders into separate Git repos | `-Interactive` |
 | `Move-RepoToCollection.ps1` | Moves/clones a TFVC repo to a different ADO collection as Git | `-Interactive` |
+| `Mirror-AdoCollection.ps1` | Mirrors every project & Git repo from one collection/org to another (cross-server supported) | `-Interactive` |
+| `Invoke-ProjectMigration.ps1` | Interactive single-project picker that shows migration status and hands off to the mirror | Yes (always) |
 | `Push-ToGitHub.ps1` | Pushes a converted Git repo to GitHub Enterprise | `-Interactive` |
 | `Invoke-ExcelMigration.ps1` | Batch migrate/split repos from the MDR spreadsheet | `-Interactive` |
 | `Invoke-ArchiveRepos.ps1` | Batch archive repos from the Dalptfs01 spreadsheet | `-Interactive` |
@@ -150,8 +287,8 @@ Key settings:
 
 | Setting | Description |
 |---|---|
-| `adoServerUrl` | Your ADO 2022 base URL (e.g. `https://ado.mcdermott.com`) |
-| `collections` | Map of collection names, each with a `pat` and optional `description` |
+| `adoServerUrl` | Default ADO server base URL (e.g. `https://ado.mcdermott.com`). Each collection inherits this unless it sets its own `serverUrl`. |
+| `collections` | Map of collection (or ADO Services org) names. Each entry takes a `pat`, an optional `description`, and an optional `serverUrl` override (set this to `https://dev.azure.com` for an ADO Services org). |
 | `outputDirectory` | Where converted Git repos are written (default: `./output`) |
 | `logDirectory` | Where log files are written (default: `./logs`) |
 | `gitTfsPath` | Path to git-tfs if it's not in your PATH |
@@ -184,6 +321,8 @@ ado-tfvc-git-migrator/
 ├── Convert-TfvcToGit.ps1             # Single TFVC-to-Git conversion
 ├── Split-TfvcToGitRepos.ps1           # Folder-level split
 ├── Move-RepoToCollection.ps1         # Cross-collection move
+├── Mirror-AdoCollection.ps1          # Full-collection Git mirror (cross-server)
+├── Invoke-ProjectMigration.ps1       # Interactive single-project picker (option [13])
 ├── Push-ToGitHub.ps1                  # GitHub Enterprise push
 ├── Invoke-ExcelMigration.ps1         # Excel-driven batch migration
 ├── Invoke-ArchiveRepos.ps1           # Excel-driven batch archive
@@ -228,7 +367,7 @@ Or pick option **[8]** from the main menu.
 
 ## Logging
 
-All operations write timestamped logs to `./logs/`. View recent logs from the main menu (option **[9]**) or browse the directory directly. Each script also supports `-Verbose` for detailed console output. Git push command logging now redacts PAT credentials in authenticated URLs.
+All operations write timestamped logs to `./logs/`. View recent logs from the main menu (option **[11]**) or browse the directory directly. Each script also supports `-Verbose` for detailed console output. Git push command logging now redacts PAT credentials in authenticated URLs.
 
 ## Troubleshooting
 

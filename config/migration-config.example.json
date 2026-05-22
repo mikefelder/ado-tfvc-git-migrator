@@ -1,13 +1,24 @@
 {
+    "_comment_adoServerUrl": "Default ADO server base URL. Each collection inherits this unless it sets its own serverUrl override.",
     "adoServerUrl": "https://ado.contoso.com",
+    "_comment_collections": "Each entry maps a collection/organization name to its PAT. Set serverUrl to override the default for cross-server mirrors (e.g. on-prem ADO Server -> Azure DevOps Services).",
     "collections": {
         "GAMS": {
             "pat": "YOUR_PAT_HERE",
             "description": "GAMS collection — legacy TFVC repos"
         },
+        "GAMS-GIT-Repos": {
+            "pat": "YOUR_PAT_HERE",
+            "description": "Source — on-prem ADO 2022 collection containing Git repos to be mirrored"
+        },
         "TargetCollection": {
             "pat": "YOUR_PAT_HERE",
-            "description": "Target collection for reorganized repos"
+            "description": "Target collection for reorganized repos (same server)"
+        },
+        "MDR-GAMS-ADO": {
+            "pat": "YOUR_PAT_HERE",
+            "serverUrl": "https://dev.azure.com",
+            "description": "Target — Azure DevOps Services organization (cross-server mirror destination). PAT must include Code (Read & Write) and Project and Team (Read, Write & Manage)."
         }
     },
     "outputDirectory": "./output",

@@ -566,31 +566,38 @@ function Invoke-Git {
     $safeCmd = $cmd -replace '://:[^@]+@', '://***@'
     Write-MigrationLog -Message "Running: $safeCmd" -LogFile $LogFile -Level INFO
 
-    $prevDir = $null
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'git'
+    $psi.Arguments = $Arguments
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
     if ($WorkingDirectory) {
-        $prevDir = Get-Location
-        Set-Location $WorkingDirectory
+        $psi.WorkingDirectory = $WorkingDirectory
     }
 
-    try {
-        $output = Invoke-Expression $cmd 2>&1
-        $exitCode = $LASTEXITCODE
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
 
-        if ($LogFile) {
-            $output | Out-File -FilePath $LogFile -Append -Encoding utf8
-        }
+    $output = @()
+    if ($stdout) { $output += ($stdout -split "`r?`n" | Where-Object { $_ -ne '' }) }
+    if ($stderr) { $output += ($stderr -split "`r?`n" | Where-Object { $_ -ne '' }) }
 
-        if ($exitCode -ne 0) {
-            throw "git failed (exit $exitCode): $output"
-        }
-
-        return $output
+    if ($LogFile) {
+        if ($stdout) { $stdout | Out-File -FilePath $LogFile -Append -Encoding utf8 }
+        if ($stderr) { $stderr | Out-File -FilePath $LogFile -Append -Encoding utf8 }
     }
-    finally {
-        if ($prevDir) {
-            Set-Location $prevDir
-        }
+
+    if ($process.ExitCode -ne 0) {
+        $detail = if ($output.Count -gt 0) { ($output -join "`n") } else { '(no output captured)' }
+        throw "git failed (exit $($process.ExitCode)): $detail"
     }
+
+    return $output
 }
 
 function Remove-GitTfsMetadata {
@@ -918,6 +925,402 @@ function Select-TfvcFolders {
     else {
         return @($folders[$selectedIndices].path)
     }
+}
+
+# ─── Cross-Server Collection Helpers ──────────────────────────────────────────
+
+function Get-CollectionServerUrl {
+    <#
+    .SYNOPSIS
+        Resolves the ADO server URL for a collection, preferring an entry-level
+        `serverUrl` override over the top-level `adoServerUrl`.
+
+    .DESCRIPTION
+        Lets the toolkit point individual collections at different ADO endpoints
+        (e.g. an on-prem ADO Server collection AND an Azure DevOps Services org
+        in the same config). Backward-compatible: if no override is set, the
+        top-level adoServerUrl is used.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [hashtable]$Config,
+        [Parameter(Mandatory)] [string]$Collection
+    )
+
+    if (-not $Config.collections.ContainsKey($Collection)) {
+        throw "Collection '$Collection' not found in config.collections."
+    }
+    $entry = $Config.collections[$Collection]
+    if ($entry.serverUrl) {
+        return ([string]$entry.serverUrl).TrimEnd('/')
+    }
+    if ($Config.adoServerUrl) {
+        return ([string]$Config.adoServerUrl).TrimEnd('/')
+    }
+    throw "No serverUrl defined for collection '$Collection' and no top-level adoServerUrl."
+}
+
+function Get-CollectionPat {
+    <#
+    .SYNOPSIS
+        Resolves the PAT for a collection from config, with a clear error if unset.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [hashtable]$Config,
+        [Parameter(Mandatory)] [string]$Collection
+    )
+    if (-not $Config.collections.ContainsKey($Collection)) {
+        throw "Collection '$Collection' not found in config.collections."
+    }
+    $pat = $Config.collections[$Collection].pat
+    if (-not $pat -or $pat -eq 'YOUR_PAT_HERE') {
+        throw "PAT for collection '$Collection' is not set. Edit your config or run New-MigrationConfig.ps1 -Interactive."
+    }
+    return $pat
+}
+
+# ─── ADO Git Repo APIs ────────────────────────────────────────────────────────
+
+function Get-AdoGitRepositories {
+    <#
+    .SYNOPSIS
+        Lists Git repositories for an ADO team project.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ServerUrl,
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$ProjectIdOrName,
+        [Parameter(Mandatory)] [string]$Pat
+    )
+
+    $encoded = [Uri]::EscapeDataString($ProjectIdOrName)
+    $url = "$ServerUrl/$Collection/$encoded/_apis/git/repositories"
+    $result = Invoke-AdoApi -Url $url -Pat $Pat
+    return $result.value
+}
+
+function Get-AdoGitRepository {
+    <#
+    .SYNOPSIS
+        Gets a single Git repository by name in a project, or $null if missing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ServerUrl,
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$ProjectIdOrName,
+        [Parameter(Mandatory)] [string]$RepoName,
+        [Parameter(Mandatory)] [string]$Pat
+    )
+
+    $encodedProject = [Uri]::EscapeDataString($ProjectIdOrName)
+    $encodedRepo = [Uri]::EscapeDataString($RepoName)
+    $url = "$ServerUrl/$Collection/$encodedProject/_apis/git/repositories/$encodedRepo"
+    try {
+        return Invoke-AdoApi -Url $url -Pat $Pat
+    }
+    catch {
+        if ($_.Exception.Message -match '404|Not Found|TF401019|does not exist') { return $null }
+        throw
+    }
+}
+
+function New-AdoGitRepository {
+    <#
+    .SYNOPSIS
+        Creates a new Git repository in an ADO team project.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ServerUrl,
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$ProjectId,
+        [Parameter(Mandatory)] [string]$Name,
+        [Parameter(Mandatory)] [string]$Pat
+    )
+
+    $url = "$ServerUrl/$Collection/_apis/git/repositories"
+    $body = @{ name = $Name; project = @{ id = $ProjectId } }
+    return Invoke-AdoApi -Url $url -Pat $Pat -Method POST -Body $body
+}
+
+# ─── ADO Team Project APIs ────────────────────────────────────────────────────
+
+function Get-AdoTeamProject {
+    <#
+    .SYNOPSIS
+        Gets a team project by name. Returns $null if it does not exist.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ServerUrl,
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Name,
+        [Parameter(Mandatory)] [string]$Pat
+    )
+
+    $encoded = [Uri]::EscapeDataString($Name)
+    $url = "$ServerUrl/$Collection/_apis/projects/$encoded"
+    try {
+        return Invoke-AdoApi -Url $url -Pat $Pat
+    }
+    catch {
+        if ($_.Exception.Message -match '404|Not Found|TF200016|does not exist') { return $null }
+        throw
+    }
+}
+
+function Get-AdoProcessTemplate {
+    <#
+    .SYNOPSIS
+        Returns a process template object, preferring a name match (default 'Agile'),
+        falling back to the org's default, then the first available.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ServerUrl,
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Pat,
+        [string]$PreferredName = 'Agile'
+    )
+
+    $url = "$ServerUrl/$Collection/_apis/process/processes"
+    $result = Invoke-AdoApi -Url $url -Pat $Pat
+    $procs = @($result.value)
+    if ($procs.Count -eq 0) {
+        throw "No process templates found at $ServerUrl/$Collection."
+    }
+
+    $match = $procs | Where-Object { $_.name -eq $PreferredName } | Select-Object -First 1
+    if (-not $match) { $match = $procs | Where-Object { $_.isDefault } | Select-Object -First 1 }
+    if (-not $match) { $match = $procs | Select-Object -First 1 }
+    return $match
+}
+
+function New-AdoTeamProject {
+    <#
+    .SYNOPSIS
+        Creates a new ADO team project (Git source control) and waits for the
+        async create operation to reach a terminal state.
+
+    .OUTPUTS
+        The created team project object (after a successful poll), or throws.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ServerUrl,
+        [Parameter(Mandatory)] [string]$Collection,
+        [Parameter(Mandatory)] [string]$Pat,
+        [Parameter(Mandatory)] [string]$Name,
+        [string]$Description = '',
+        [string]$ProcessTemplateId,
+        [string]$PreferredProcessName = 'Agile',
+        [int]$TimeoutSeconds = 240,
+        [string]$LogFile
+    )
+
+    if (-not $ProcessTemplateId) {
+        $template = Get-AdoProcessTemplate -ServerUrl $ServerUrl -Collection $Collection `
+            -Pat $Pat -PreferredName $PreferredProcessName
+        $ProcessTemplateId = $template.id
+        Write-MigrationLog -Message "Using process template '$($template.name)' ($ProcessTemplateId)" -LogFile $LogFile
+    }
+
+    $url = "$ServerUrl/$Collection/_apis/projects"
+    $body = @{
+        name         = $Name
+        description  = $Description
+        capabilities = @{
+            versioncontrol  = @{ sourceControlType = 'Git' }
+            processTemplate = @{ templateTypeId = $ProcessTemplateId }
+        }
+    }
+
+    $opRef = Invoke-AdoApi -Url $url -Pat $Pat -Method POST -Body $body
+    if (-not $opRef.id) {
+        throw "Create project '$Name' returned no operation id."
+    }
+
+    $opUrl = "$ServerUrl/$Collection/_apis/operations/$($opRef.id)"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastStatus = ''
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 2
+        try {
+            $op = Invoke-AdoApi -Url $opUrl -Pat $Pat
+        }
+        catch {
+            # Transient — keep polling until deadline
+            continue
+        }
+        if ($op.status -ne $lastStatus) {
+            Write-MigrationLog -Message "  Project '$Name' create status: $($op.status)" -LogFile $LogFile
+            $lastStatus = $op.status
+        }
+        if ($op.status -eq 'succeeded') {
+            # Project shows up in lookups almost immediately after the op succeeds,
+            # but allow a brief settle window.
+            for ($try = 0; $try -lt 10; $try++) {
+                $proj = Get-AdoTeamProject -ServerUrl $ServerUrl -Collection $Collection -Name $Name -Pat $Pat
+                if ($proj) {
+                    Write-MigrationLog -Message "Created project '$Name'." -LogFile $LogFile -Level SUCCESS
+                    return $proj
+                }
+                Start-Sleep -Seconds 1
+            }
+            throw "Project '$Name' create reported success but project was not found within 10s."
+        }
+        if ($op.status -in @('failed', 'cancelled')) {
+            $msg = if ($op.resultMessage) { $op.resultMessage } else { "Project creation $($op.status)." }
+            throw "Create project '$Name' $($op.status): $msg"
+        }
+    }
+    throw "Create project '$Name' timed out after $TimeoutSeconds seconds (last status: $lastStatus)."
+}
+
+# ─── Git Mirror Helpers ───────────────────────────────────────────────────────
+
+function Add-PatToGitUrl {
+    <#
+    .SYNOPSIS
+        Embeds a PAT into an HTTPS Git URL for non-interactive clone/push.
+        Strips any existing user-info first to avoid double credentials.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Url,
+        [Parameter(Mandatory)] [string]$Pat
+    )
+
+    if ($Url -notmatch '^https?://') {
+        throw "Cannot embed PAT in non-HTTPS URL: $Url"
+    }
+    # Strip any existing user-info (e.g. "user@" or "user:pwd@")
+    $cleaned = $Url -replace '^(https?://)([^@/]+@)', '$1'
+    # PAT goes in the password slot; username is left empty (ADO accepts this).
+    return $cleaned -replace '^(https?://)', "`$1:$Pat@"
+}
+
+function Invoke-GitMirror {
+    <#
+    .SYNOPSIS
+        Runs a long-running git command (typically `clone --mirror` or
+        `push --mirror`) with a progress spinner, optional hard timeout,
+        and optional stall detection. PATs in URLs are redacted from logs.
+
+    .PARAMETER Arguments
+        The full argument string passed to git (without the leading 'git').
+
+    .PARAMETER StatusLabel
+        Short label shown next to the spinner, e.g. 'Cloning' or 'Pushing'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Arguments,
+        [string]$WorkingDirectory,
+        [string]$LogFile,
+        [string]$StatusLabel = 'Working',
+        [int]$TimeoutMinutes = 0,
+        [int]$StallTimeoutMinutes = 0
+    )
+
+    $safeArgs = $Arguments -replace '://[^/@\s]*:[^@]+@', '://***@'
+    Write-MigrationLog -Message "Running: git $safeArgs" -LogFile $LogFile -Level INFO
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'git'
+    $psi.Arguments = $Arguments
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
+    $hasTimeout = $TimeoutMinutes -gt 0
+    $hasStallTimeout = $StallTimeoutMinutes -gt 0
+    $deadline = if ($hasTimeout) { (Get-Date).AddMinutes($TimeoutMinutes) } else { [datetime]::MaxValue }
+
+    $lastErrSize = 0
+    $lastErrChange = Get-Date
+    $spinChars = @('|', '/', '-', '\')
+    $i = 0
+    $timedOut = $false
+    $stalled = $false
+
+    while (-not $process.HasExited) {
+        $now = Get-Date
+        $elapsed = $now - $process.StartTime
+        $spin = $spinChars[$i % 4]; $i++
+
+        $line = "  $spin  $StatusLabel... (elapsed: $($elapsed.ToString('hh\:mm\:ss'))"
+        if ($hasTimeout) {
+            $remaining = $deadline - $now
+            if ($remaining.TotalSeconds -gt 0) {
+                $line += " | timeout in: $($remaining.ToString('hh\:mm\:ss'))"
+            }
+        }
+        $line += ")  "
+        Write-Host "`r$line" -NoNewline -ForegroundColor DarkGray
+
+        if ($hasTimeout -and $now -ge $deadline) {
+            $timedOut = $true
+            Write-MigrationLog -Message "TIMEOUT: git $StatusLabel exceeded $TimeoutMinutes minute limit." -LogFile $LogFile -Level ERROR
+            try { $process.Kill() } catch { }
+            break
+        }
+        if ($hasStallTimeout) {
+            # git progress writes to stderr; use that as the activity heartbeat.
+            $curr = 0
+            try { $curr = $stderrTask.Result.Length } catch { $curr = 0 }
+            if ($null -eq $curr) { $curr = 0 }
+            if ($curr -ne $lastErrSize) {
+                $lastErrSize = $curr
+                $lastErrChange = $now
+            }
+            elseif (($now - $lastErrChange).TotalMinutes -ge $StallTimeoutMinutes) {
+                $stalled = $true
+                Write-MigrationLog -Message "STALL DETECTED: git $StatusLabel produced no output for $StallTimeoutMinutes minutes. Killing." -LogFile $LogFile -Level ERROR
+                try { $process.Kill() } catch { }
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 400
+    }
+
+    if ($timedOut) {
+        Write-Host "`r  ✗  TIMED OUT after $TimeoutMinutes minutes.                              " -ForegroundColor Red
+        throw "git $StatusLabel timed out after $TimeoutMinutes minutes."
+    }
+    if ($stalled) {
+        Write-Host "`r  ✗  STALLED — no output for $StallTimeoutMinutes minutes.                  " -ForegroundColor Red
+        throw "git $StatusLabel stalled (no output for $StallTimeoutMinutes minutes)."
+    }
+
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    $safeStderr = $stderr -replace '://[^/@\s]*:[^@]+@', '://***@'
+
+    if ($LogFile) {
+        if ($stdout) { $stdout | Out-File -FilePath $LogFile -Append -Encoding utf8 }
+        if ($safeStderr) { $safeStderr | Out-File -FilePath $LogFile -Append -Encoding utf8 }
+    }
+
+    if ($process.ExitCode -ne 0) {
+        Write-Host "`r  ✗  $StatusLabel failed (exit $($process.ExitCode)).                       " -ForegroundColor Red
+        $detail = $safeStderr.Trim()
+        if (-not $detail) { $detail = $stdout.Trim() }
+        if (-not $detail) { $detail = '(no output captured)' }
+        throw "git $StatusLabel failed (exit $($process.ExitCode)): $detail"
+    }
+
+    Write-Host "`r  ✓  $StatusLabel finished in $((Get-Date) - $process.StartTime | ForEach-Object { $_.ToString('hh\:mm\:ss') }).                              " -ForegroundColor Green
+    return @{ Stdout = $stdout; Stderr = $safeStderr }
 }
 
 Export-ModuleMember -Function *

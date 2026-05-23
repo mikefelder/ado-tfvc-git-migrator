@@ -96,15 +96,16 @@ while ($true) {
     Write-Host "  [4]  Convert Repo          Convert a single repo from TFVC to Git" -ForegroundColor White
     Write-Host "  [5]  Split Repo            Break one large repo into smaller Git repos" -ForegroundColor White
     Write-Host "  [6]  Move Repo             Move a repo to a different collection" -ForegroundColor White
-    Write-Host "  [7]  Push to GitHub        Send a converted repo to GitHub" -ForegroundColor White
+    Write-Host "  [7]  Move Git Repos        Bulk-move all Git repos to another collection/project" -ForegroundColor White
+    Write-Host "  [8]  Push to GitHub        Send a converted repo to GitHub" -ForegroundColor White
     Write-Host ""
     Write-Host "  ── Batch (from spreadsheet) ───────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [8]  Run Migration Plan    Execute a saved migration plan file" -ForegroundColor White
-    Write-Host "  [9]  Batch Migrate         Migrate all repos from the MDR spreadsheet" -ForegroundColor White
-    Write-Host "  [10] Batch Archive         Archive repos from the Dalptfs01 spreadsheet" -ForegroundColor White
+    Write-Host "  [9]  Run Migration Plan    Execute a saved migration plan file" -ForegroundColor White
+    Write-Host "  [10] Batch Migrate         Migrate all repos from the MDR spreadsheet" -ForegroundColor White
+    Write-Host "  [11] Batch Archive         Archive repos from the Dalptfs01 spreadsheet" -ForegroundColor White
     Write-Host ""
     Write-Host "  ── Other ──────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  [11] View Logs             Open the logs folder" -ForegroundColor White
+    Write-Host "  [12] View Logs             Open the logs folder" -ForegroundColor White
     Write-Host "  [0]  Exit" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Select an option: " -ForegroundColor Yellow -NoNewline
@@ -150,13 +151,20 @@ while ($true) {
             Pause-ForUser
         }
         '7' {
+            # Bulk Move Git Repos (cross-collection mirror move)
+            if (-not (Test-ConfigReady)) { continue }
+            Show-Banner
+            & "$PSScriptRoot/Move-GitReposToCollection.ps1" -ConfigPath $ConfigPath -Interactive
+            Pause-ForUser
+        }
+        '8' {
             # Push to GitHub
             if (-not (Test-ConfigReady)) { continue }
             Show-Banner
             & "$PSScriptRoot/Push-ToGitHub.ps1" -ConfigPath $ConfigPath -Interactive
             Pause-ForUser
         }
-        '8' {
+        '9' {
             # Batch migration
             if (-not (Test-ConfigReady)) { continue }
             Show-Banner
@@ -191,21 +199,21 @@ while ($true) {
             }
             Pause-ForUser
         }
-        '9' {
+        '10' {
             # Excel-driven migration
             if (-not (Test-ConfigReady)) { continue }
             Show-Banner
             & "$PSScriptRoot/Invoke-ExcelMigration.ps1" -ConfigPath $ConfigPath -Interactive
             Pause-ForUser
         }
-        '10' {
+        '11' {
             # Archive repos
             if (-not (Test-ConfigReady)) { continue }
             Show-Banner
             & "$PSScriptRoot/Invoke-ArchiveRepos.ps1" -ConfigPath $ConfigPath -Interactive
             Pause-ForUser
         }
-        '11' {
+        '12' {
             # View logs
             $logDir = './logs'
             if (Test-Path $ConfigPath) {
@@ -255,7 +263,7 @@ while ($true) {
             return
         }
         default {
-            Write-Host "  Invalid option. Please enter a number 0-11." -ForegroundColor Red
+            Write-Host "  Invalid option. Please enter a number 0-12." -ForegroundColor Red
             Start-Sleep -Seconds 1
         }
     }

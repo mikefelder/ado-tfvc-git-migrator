@@ -20,15 +20,16 @@ This launches a menu-driven interface:
 | **4** | Convert Repo | Convert a single TFVC repo to Git |
 | **5** | Split Repo | Break one large repo into smaller Git repos by folder |
 | **6** | Move Repo | Move a repo to a different ADO collection |
-| **7** | Push to GitHub | Send a converted repo to GitHub Enterprise |
-| **8** | Run Migration Plan | Execute a saved migration plan JSON file |
-| **9** | Batch Migrate | Read the MDR spreadsheet and migrate/split repos in bulk |
-| **10** | Batch Archive | Archive repos from the Dalptfs01 spreadsheet |
-| **11** | View Logs | Open the logs folder |
+| **7** | Move Git Repos | Bulk-move every Git repo from one collection/project to another (mirror) |
+| **8** | Push to GitHub | Send a converted repo to GitHub Enterprise |
+| **9** | Run Migration Plan | Execute a saved migration plan JSON file |
+| **10** | Batch Migrate | Read the MDR spreadsheet and migrate/split repos in bulk |
+| **11** | Batch Archive | Archive repos from the Dalptfs01 spreadsheet |
+| **12** | View Logs | Open the logs folder |
 
 No need to remember parameter names or edit JSON by hand.
 
-## Excel-Driven Batch Migration (Option 9)
+## Excel-Driven Batch Migration (Option 10)
 
 The primary workflow for McDermott's migration. Reads the **MDR-4ADO-AllProjects.xlsx** spreadsheet ("GAMS-Repos-App-Folder level" worksheet) and processes every row:
 
@@ -68,13 +69,35 @@ During batch execution, the migration runner now also:
     -TimeoutMinutes 120 -StallTimeoutMinutes 30
 ```
 
-## Batch Archive (Option 10)
+## Batch Archive (Option 11)
 
 Reads the **Dalptfs01-Collections-MikeFelder.xlsx** spreadsheet and archives repos flagged for decommissioning.
 
 ```powershell
 ./Invoke-ArchiveRepos.ps1 -ConfigPath ./config/migration-config.json -Interactive
 ```
+
+## Bulk Move Git Repos Across Collections (Option 7)
+
+When a project already contains **Git** repos in one ADO collection and you need to lift-and-shift every repo into a project in a different collection, use this script. It does a full mirror (`git clone --mirror` → create target repo → `git push --mirror`) for every repo in the source project, preserving all branches and tags.
+
+```powershell
+# Interactive (recommended) — pick source/target collection+project and which repos to move
+./Move-GitReposToCollection.ps1 -ConfigPath ./config/migration-config.json -Interactive
+
+# Preview only — no repos created, no pushes performed
+./Move-GitReposToCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection "LegacyCollection" -SourceProject "Apps" `
+    -TargetCollection "ModernCollection" -TargetProject "Apps" -DryRun
+
+# Direct — move only matching repos and skip any that already exist on the target
+./Move-GitReposToCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection "LegacyCollection" -SourceProject "Apps" `
+    -TargetCollection "ModernCollection" -TargetProject "Apps" `
+    -IncludeRepoNames @('app-a','app-b') -SkipExisting
+```
+
+A timestamped manifest CSV is written to your `logDirectory` summarising each repo (Moved / PushedIntoExisting / Skipped / Failed) with source URL, target URL, and per-repo duration.
 
 ## Getting Started (Command-Line)
 
@@ -120,6 +143,7 @@ cp config/migration-config.example.json config/migration-config.json
 | `Convert-TfvcToGit.ps1` | Converts a TFVC repo to a Git repo via git-tfs | `-Interactive` |
 | `Split-TfvcToGitRepos.ps1` | Splits TFVC subfolders into separate Git repos | `-Interactive` |
 | `Move-RepoToCollection.ps1` | Moves/clones a TFVC repo to a different ADO collection as Git | `-Interactive` |
+| `Move-GitReposToCollection.ps1` | Bulk-mirrors every Git repo from one collection/project to another (no TFVC conversion) | `-Interactive` |
 | `Push-ToGitHub.ps1` | Pushes a converted Git repo to GitHub Enterprise | `-Interactive` |
 | `Invoke-ExcelMigration.ps1` | Batch migrate/split repos from the MDR spreadsheet | `-Interactive` |
 | `Invoke-ArchiveRepos.ps1` | Batch archive repos from the Dalptfs01 spreadsheet | `-Interactive` |
@@ -184,6 +208,7 @@ ado-tfvc-git-migrator/
 ├── Convert-TfvcToGit.ps1             # Single TFVC-to-Git conversion
 ├── Split-TfvcToGitRepos.ps1           # Folder-level split
 ├── Move-RepoToCollection.ps1         # Cross-collection move
+├── Move-GitReposToCollection.ps1     # Bulk Git→Git cross-collection mirror move
 ├── Push-ToGitHub.ps1                  # GitHub Enterprise push
 ├── Invoke-ExcelMigration.ps1         # Excel-driven batch migration
 ├── Invoke-ArchiveRepos.ps1           # Excel-driven batch archive

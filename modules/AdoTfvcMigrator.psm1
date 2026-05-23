@@ -151,6 +151,80 @@ function Get-AdoProjects {
     return $result.value
 }
 
+function Get-AdoGitRepositories {
+    <#
+    .SYNOPSIS
+        Lists Git repositories in an ADO collection (optionally filtered to a single project).
+    .OUTPUTS
+        Array of repo objects from the ADO REST API (each has id, name, defaultBranch, remoteUrl, project, size, etc.).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerUrl,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$Pat,
+        [string]$ProjectName
+    )
+
+    $url = if ($ProjectName) {
+        "$ServerUrl/$Collection/$ProjectName/_apis/git/repositories"
+    }
+    else {
+        "$ServerUrl/$Collection/_apis/git/repositories"
+    }
+
+    $result = Invoke-AdoApi -Url $url -Pat $Pat
+    return @($result.value)
+}
+
+function New-AdoGitRepository {
+    <#
+    .SYNOPSIS
+        Creates a new Git repo in an ADO project. Returns the new (or existing) repo object.
+    .DESCRIPTION
+        On HTTP 409 (repo already exists), this function transparently fetches and returns
+        the pre-existing repo so callers can continue. Set -FailIfExists to throw instead.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerUrl,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$Pat,
+        [Parameter(Mandatory)]
+        [string]$ProjectName,
+        [Parameter(Mandatory)]
+        [string]$ProjectId,
+        [Parameter(Mandatory)]
+        [string]$RepoName,
+        [switch]$FailIfExists
+    )
+
+    $createBody = @{
+        name    = $RepoName
+        project = @{ id = $ProjectId }
+    }
+
+    try {
+        $url = "$ServerUrl/$Collection/_apis/git/repositories"
+        return Invoke-AdoApi -Url $url -Pat $Pat -Method POST -Body $createBody
+    }
+    catch {
+        $msg = $_.Exception.Message
+        $isConflict = ($msg -like '*already exists*') -or ($msg -like '*409*') -or ($msg -like '*TF401019*')
+        if ($isConflict -and -not $FailIfExists) {
+            $lookupUrl = "$ServerUrl/$Collection/$ProjectName/_apis/git/repositories/$RepoName"
+            return Invoke-AdoApi -Url $lookupUrl -Pat $Pat
+        }
+        throw
+    }
+}
+
 function Get-TfvcItems {
     [CmdletBinding()]
     param(

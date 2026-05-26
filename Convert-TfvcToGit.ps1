@@ -21,6 +21,10 @@
 .PARAMETER Collection
     ADO collection name (skipped in interactive mode).
 
+.PARAMETER ServerUrl
+    Optional source ADO server URL override. If omitted, uses sourceAdoServerUrl
+    from config, then falls back to legacy adoServerUrl.
+
 .PARAMETER ProjectName
     Team project name (skipped in interactive mode).
 
@@ -52,6 +56,8 @@ param(
 
     [switch]$Interactive,
 
+    [string]$ServerUrl,
+
     [string]$Collection,
     [string]$ProjectName,
     [string]$TfvcPath,
@@ -76,6 +82,9 @@ Import-Module "$PSScriptRoot/modules/AdoTfvcMigrator.psm1" -Force
 
 $config = Read-MigrationConfig -ConfigPath $ConfigPath
 $logFile = Initialize-MigrationLog -LogDirectory $config.logDirectory -ScriptName 'ConvertTfvcToGit'
+if (-not $ServerUrl) {
+    $ServerUrl = Get-ConfigAdoServerUrl -Config $config -Role Source
+}
 
 # ─── Interactive Mode ──────────────────────────────────────────────────────────
 
@@ -89,7 +98,7 @@ if ($Interactive) {
     if (-not $Collection) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     # 2. Pick project
-    $ProjectName = Select-AdoProject -Config $config -Collection $Collection -Prompt 'Select project'
+    $ProjectName = Select-AdoProject -Config $config -Collection $Collection -ServerUrl $ServerUrl -Prompt 'Select project'
     if (-not $ProjectName) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     # 3. Browse TFVC folders (or use project root)
@@ -109,7 +118,7 @@ if ($Interactive) {
         $currentPath = $TfvcPath
         while ($true) {
             $selected = Select-TfvcFolders -Config $config -Collection $Collection `
-                -ProjectName $ProjectName -ParentPath $currentPath -Prompt 'Select folder to convert'
+                -ProjectName $ProjectName -ServerUrl $ServerUrl -ParentPath $currentPath -Prompt 'Select folder to convert'
             if (-not $selected) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
             $chosenPath = $selected[0]
@@ -182,6 +191,7 @@ if (-not $ProjectName) { throw "ProjectName is required. Use -Interactive or pro
 if (-not $TfvcPath)    { throw "TfvcPath is required. Use -Interactive or provide -TfvcPath." }
 
 Write-MigrationLog -Message "Starting TFVC-to-Git conversion" -LogFile $logFile -Level INFO
+Write-MigrationLog -Message "  Server URL:  $ServerUrl" -LogFile $logFile
 Write-MigrationLog -Message "  Collection:  $Collection" -LogFile $logFile
 Write-MigrationLog -Message "  Project:     $ProjectName" -LogFile $logFile
 Write-MigrationLog -Message "  TFVC Path:   $TfvcPath" -LogFile $logFile
@@ -197,7 +207,7 @@ $pat = $collectionConfig.pat
 
 # Verify connection
 Write-Host "  Verifying connection to ADO..." -ForegroundColor DarkGray
-$connTest = Test-AdoConnection -ServerUrl $config.adoServerUrl -Collection $Collection -Pat $pat
+$connTest = Test-AdoConnection -ServerUrl $ServerUrl -Collection $Collection -Pat $pat
 if (-not $connTest.Connected) {
     Write-Host ""
     Write-Host "  Could not connect to '$Collection'." -ForegroundColor Red
@@ -251,7 +261,7 @@ if (Test-Path $outputPath) {
 try { & git config --global core.longpaths true 2>$null } catch { }
 
 $encodedCollection = [Uri]::EscapeDataString($Collection)
-$tfsUrl = "$($config.adoServerUrl)/$encodedCollection"
+$tfsUrl = "$ServerUrl/$encodedCollection"
 $depth = if ($HistoryDepth) { $HistoryDepth } elseif ($config.migrationDefaults.historyDepthLimit) { $config.migrationDefaults.historyDepthLimit } else { $null }
 
 # ── Path-length mitigation: use subst drive + short temp name during clone ──

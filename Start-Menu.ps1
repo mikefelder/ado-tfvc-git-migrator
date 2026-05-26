@@ -41,9 +41,10 @@ function Show-ConfigStatus {
         try {
             $cfg = Read-MigrationConfig -ConfigPath $ConfigPath
             $collCount = $cfg.collections.Keys.Count
-            $server = $cfg.adoServerUrl
+            $sourceServer = if ($cfg.sourceAdoServerUrl) { $cfg.sourceAdoServerUrl } else { $cfg.adoServerUrl }
+            $targetServer = if ($cfg.targetAdoServerUrl) { $cfg.targetAdoServerUrl } else { $cfg.adoServerUrl }
             Write-Host "  Config:  " -NoNewline -ForegroundColor DarkGray
-            Write-Host "Loaded ($collCount collection(s) — $server)" -ForegroundColor Green
+            Write-Host "Loaded ($collCount collection(s) — src: $sourceServer | tgt: $targetServer)" -ForegroundColor Green
         }
         catch {
             Write-Host "  Config:  " -NoNewline -ForegroundColor DarkGray

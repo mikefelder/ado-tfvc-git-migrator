@@ -32,6 +32,8 @@ No need to remember parameter names or edit JSON by hand.
 
 The primary workflow for McDermott's migration. Reads the **MDR-4ADO-AllProjects.xlsx** spreadsheet ("GAMS-Repos-App-Folder level" worksheet) and processes every row:
 
+- **Cross-endpoint supported** → Source can be ADO Server 2022 on-prem while target is Azure DevOps Services (configure `sourceAdoServerUrl` and `targetAdoServerUrl`).
+
 - **Column G = "Repo" + Recommendation = "Migrate"** → Converts the entire TFVC repo to Git as-is. If multiple spreadsheet rows reference the same repo (one per subfolder), it's only migrated once.
 - **Column G = "Folder" + Recommendation = "Migrate"** → Extracts that folder from the parent repo into a standalone Git repo named `RepoName_FolderName`. All folders from the same parent are extracted in a single batch.
 - **Recommendation = "Archive"** → Skipped (not migrated).
@@ -137,7 +139,7 @@ Run `Install-Prerequisites.ps1` (or pick option **[2]** from the main menu) to v
 - **Azure DevOps Server 2022** network connectivity
 - A **PAT (Personal Access Token)** per collection with `Code (Read & Write)` and `Project and Team (Read)` scopes
 
-> **Important:** The ADO server URL in your config must use `https://`. git-tfs requires a secure connection for PAT authentication.
+> **Important:** Source and target ADO URLs in your config must use `https://`. git-tfs requires a secure connection for PAT authentication.
 
 ## Configuration
 
@@ -150,7 +152,9 @@ Key settings:
 
 | Setting | Description |
 |---|---|
-| `adoServerUrl` | Your ADO 2022 base URL (e.g. `https://ado.mcdermott.com`) |
+| `sourceAdoServerUrl` | Source ADO base URL (typically on-prem ADO 2022, e.g. `https://ado.mcdermott.com`) |
+| `targetAdoServerUrl` | Target ADO base URL (for ADO Services use `https://dev.azure.com`) |
+| `adoServerUrl` | Legacy fallback URL used when source/target URLs are not set |
 | `collections` | Map of collection names, each with a `pat` and optional `description` |
 | `outputDirectory` | Where converted Git repos are written (default: `./output`) |
 | `logDirectory` | Where log files are written (default: `./logs`) |
@@ -238,7 +242,7 @@ Common issues and what to do:
 |---|---|---|
 | "Authentication failed — your PAT may be expired" | PAT expired or wrong | Generate a new PAT in ADO and update your config |
 | "Access denied — your PAT doesn't have the required permissions" | Missing PAT scopes | Ensure `Code (Read & Write)` and `Project and Team (Read)` |
-| "Basic authentication requires a secure connection" | Server URL uses `http://` | Change `adoServerUrl` in your config to `https://` |
+| "Basic authentication requires a secure connection" | Source or target server URL uses `http://` | Change `sourceAdoServerUrl`/`targetAdoServerUrl` in your config to `https://` |
 | TF400959 "limit of 248 characters" / path too long errors | Windows MAX_PATH limit hit by deeply nested TFVC files | The toolkit now automatically uses `subst` to create a short drive-letter path during cloning, which dramatically reduces path length. This happens transparently — no manual steps needed. If you still hit issues: **1)** Set `outputDirectory` to something very short like `C:\M`; **2)** Enable long paths system-wide: `reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v LongPathsEnabled /t REG_DWORD /d 1 /f` (admin + reboot); **3)** Ensure `core.longpaths` is set (the toolkit does this automatically). If paths in TFVC exceed ~200 characters even after the drive root, consider using the `Split-TfvcToGitRepos.ps1` script to clone only the subfolder you need rather than the entire project tree. |
 | "Cannot reach the ADO server" | Network/VPN issue | Check VPN connection and server URL in config |
 | "git-tfs not found" | Tool not installed | Run `Install-Prerequisites.ps1` for instructions |

@@ -1,4 +1,6 @@
 {
+    "sourceAdoServerUrl": "https://ado.contoso.com",
+    "targetAdoServerUrl": "https://dev.azure.com",
     "adoServerUrl": "https://ado.contoso.com",
     "collections": {
         "GAMS": {

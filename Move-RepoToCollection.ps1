@@ -22,6 +22,10 @@
 .PARAMETER SourceCollection
     Source ADO collection name (skipped in interactive mode).
 
+.PARAMETER SourceServerUrl
+    Optional source ADO server URL override. If omitted, uses sourceAdoServerUrl
+    from config, then falls back to legacy adoServerUrl.
+
 .PARAMETER SourceProject
     Source team project name (skipped in interactive mode).
 
@@ -30,6 +34,10 @@
 
 .PARAMETER TargetCollection
     Target ADO collection name.
+
+.PARAMETER TargetServerUrl
+    Optional target ADO server URL override. If omitted, uses targetAdoServerUrl
+    from config, then falls back to legacy adoServerUrl.
 
 .PARAMETER TargetProject
     Target team project name.
@@ -64,9 +72,11 @@ param(
     [string]$SourceCollection,
     [string]$SourceProject,
     [string]$TfvcPath,
+    [string]$SourceServerUrl,
     [string]$TargetCollection,
     [string]$TargetProject,
     [string]$TargetRepoName,
+    [string]$TargetServerUrl,
 
     [int]$HistoryDepth,
 
@@ -88,6 +98,12 @@ Import-Module "$PSScriptRoot/modules/AdoTfvcMigrator.psm1" -Force
 
 $config = Read-MigrationConfig -ConfigPath $ConfigPath
 $logFile = Initialize-MigrationLog -LogDirectory $config.logDirectory -ScriptName 'MoveRepoToCollection'
+if (-not $SourceServerUrl) {
+    $SourceServerUrl = Get-ConfigAdoServerUrl -Config $config -Role Source
+}
+if (-not $TargetServerUrl) {
+    $TargetServerUrl = Get-ConfigAdoServerUrl -Config $config -Role Target
+}
 
 # ─── Interactive Mode ──────────────────────────────────────────────────────────
 
@@ -101,14 +117,14 @@ if ($Interactive) {
     if (-not $SourceCollection) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     # ── 2. Pick source project ──
-    $SourceProject = Select-AdoProject -Config $config -Collection $SourceCollection -Prompt 'Select SOURCE project'
+    $SourceProject = Select-AdoProject -Config $config -Collection $SourceCollection -ServerUrl $SourceServerUrl -Prompt 'Select SOURCE project'
     if (-not $SourceProject) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     # ── 3. Browse and pick a TFVC folder ──
     $currentPath = "`$/$SourceProject"
     while ($true) {
         $selected = Select-TfvcFolders -Config $config -Collection $SourceCollection `
-            -ProjectName $SourceProject -ParentPath $currentPath -Prompt 'Select a folder to move (or drill deeper)'
+            -ProjectName $SourceProject -ServerUrl $SourceServerUrl -ParentPath $currentPath -Prompt 'Select a folder to move (or drill deeper)'
         if (-not $selected) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
         $chosenPath = $selected[0]
@@ -140,7 +156,7 @@ if ($Interactive) {
     if (-not $TargetCollection) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     # ── 5. Pick target project ──
-    $TargetProject = Select-AdoProject -Config $config -Collection $TargetCollection -Prompt 'Select TARGET project'
+    $TargetProject = Select-AdoProject -Config $config -Collection $TargetCollection -ServerUrl $TargetServerUrl -Prompt 'Select TARGET project'
     if (-not $TargetProject) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     # ── 6. Repo name ──
@@ -190,7 +206,9 @@ if (-not $TargetProject)    { throw "TargetProject is required. Use -Interactive
 if (-not $TargetRepoName)   { throw "TargetRepoName is required. Use -Interactive or provide -TargetRepoName." }
 
 Write-MigrationLog -Message "Starting cross-collection move" -LogFile $logFile -Level INFO
+Write-MigrationLog -Message "  Source URL: $SourceServerUrl" -LogFile $logFile
 Write-MigrationLog -Message "  Source: $SourceCollection/$SourceProject ($TfvcPath)" -LogFile $logFile
+Write-MigrationLog -Message "  Target URL: $TargetServerUrl" -LogFile $logFile
 Write-MigrationLog -Message "  Target: $TargetCollection/$TargetProject/$TargetRepoName" -LogFile $logFile
 
 # ─── Validate Source & Target ──────────────────────────────────────────────────
@@ -205,13 +223,13 @@ $sourcePat = $sourceConfig.pat
 $targetPat = $targetConfig.pat
 
 # Test source
-$sourceTest = Test-AdoConnection -ServerUrl $config.adoServerUrl -Collection $SourceCollection -Pat $sourcePat
+$sourceTest = Test-AdoConnection -ServerUrl $SourceServerUrl -Collection $SourceCollection -Pat $sourcePat
 if (-not $sourceTest.Connected) {
     throw "Cannot connect to source collection '$SourceCollection': $($sourceTest.Error)"
 }
 
 # Test target
-$targetTest = Test-AdoConnection -ServerUrl $config.adoServerUrl -Collection $TargetCollection -Pat $targetPat
+$targetTest = Test-AdoConnection -ServerUrl $TargetServerUrl -Collection $TargetCollection -Pat $targetPat
 if (-not $targetTest.Connected) {
     throw "Cannot connect to target collection '$TargetCollection': $($targetTest.Error)"
 }
@@ -234,6 +252,7 @@ else {
 
     $convertParams = @{
         ConfigPath     = $ConfigPath
+        ServerUrl      = $SourceServerUrl
         Collection     = $SourceCollection
         ProjectName    = $SourceProject
         TfvcPath       = $TfvcPath
@@ -269,7 +288,7 @@ if (-not $SkipTargetRepoCreation) {
     Write-MigrationLog -Message "Step 2: Creating Git repo '$TargetRepoName' in $TargetCollection/$TargetProject" -LogFile $logFile -Level INFO
 
     # Find the project ID
-    $projects = Get-AdoProjects -ServerUrl $config.adoServerUrl -Collection $TargetCollection -Pat $targetPat
+    $projects = Get-AdoProjects -ServerUrl $TargetServerUrl -Collection $TargetCollection -Pat $targetPat
     $targetProjectObj = $projects | Where-Object { $_.name -eq $TargetProject }
     if (-not $targetProjectObj) {
         throw "Project '$TargetProject' not found in '$TargetCollection'."
@@ -283,7 +302,7 @@ if (-not $SkipTargetRepoCreation) {
     }
 
     try {
-        $url = "$($config.adoServerUrl)/$TargetCollection/_apis/git/repositories"
+        $url = "$TargetServerUrl/$TargetCollection/_apis/git/repositories"
         $newRepo = Invoke-AdoApi -Url $url -Pat $targetPat -Method POST -Body $createBody
         $remoteUrl = $newRepo.remoteUrl
         Write-MigrationLog -Message "Created repo: $remoteUrl" -LogFile $logFile -Level SUCCESS
@@ -292,7 +311,7 @@ if (-not $SkipTargetRepoCreation) {
         if ($_.Exception.Message -like '*already exists*' -or $_.Exception.Message -like '*409*') {
             Write-MigrationLog -Message "Repo already exists — will push to existing" -LogFile $logFile -Level WARN
             # Fetch existing repo URL
-            $url = "$($config.adoServerUrl)/$TargetCollection/$TargetProject/_apis/git/repositories/$TargetRepoName"
+            $url = "$TargetServerUrl/$TargetCollection/$TargetProject/_apis/git/repositories/$TargetRepoName"
             $existingRepo = Invoke-AdoApi -Url $url -Pat $targetPat
             $remoteUrl = $existingRepo.remoteUrl
         }
@@ -303,7 +322,7 @@ if (-not $SkipTargetRepoCreation) {
 }
 else {
     # Get existing repo URL
-    $url = "$($config.adoServerUrl)/$TargetCollection/$TargetProject/_apis/git/repositories/$TargetRepoName"
+    $url = "$TargetServerUrl/$TargetCollection/$TargetProject/_apis/git/repositories/$TargetRepoName"
     $existingRepo = Invoke-AdoApi -Url $url -Pat $targetPat
     $remoteUrl = $existingRepo.remoteUrl
 }

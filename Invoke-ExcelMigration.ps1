@@ -29,6 +29,14 @@
 .PARAMETER TargetCollection
     Target ADO collection to move migrated repos into. Required.
 
+.PARAMETER SourceServerUrl
+    Optional source ADO server URL override. If omitted, uses sourceAdoServerUrl
+    from config, then falls back to legacy adoServerUrl.
+
+.PARAMETER TargetServerUrl
+    Optional target ADO server URL override. If omitted, uses targetAdoServerUrl
+    from config, then falls back to legacy adoServerUrl.
+
 .PARAMETER TargetProject
     Target ADO project to move migrated repos into. Required.
 
@@ -65,9 +73,13 @@ param(
 
     [string]$WorksheetName = 'GAMS-Repos-App-Folder level',
 
+    [string]$SourceServerUrl,
+
     [string]$TargetCollection,
 
     [string]$TargetProject,
+
+    [string]$TargetServerUrl,
 
     [string]$ResumeManifest,
 
@@ -100,6 +112,14 @@ Import-Module ImportExcel
 
 $config = Read-MigrationConfig -ConfigPath $ConfigPath
 $logFile = Initialize-MigrationLog -LogDirectory $config.logDirectory -ScriptName 'ExcelMigration'
+if (-not $SourceServerUrl) {
+    $SourceServerUrl = Get-ConfigAdoServerUrl -Config $config -Role Source
+}
+if (-not $TargetServerUrl) {
+    $TargetServerUrl = Get-ConfigAdoServerUrl -Config $config -Role Target
+}
+Write-MigrationLog -Message "Source ADO URL: $SourceServerUrl" -LogFile $logFile -Level INFO
+Write-MigrationLog -Message "Target ADO URL: $TargetServerUrl" -LogFile $logFile -Level INFO
 
 # ─── Load Resume Manifest (if provided) ───────────────────────────────────────
 
@@ -614,6 +634,7 @@ foreach ($group in $grouped) {
 
                 & "$PSScriptRoot/Convert-TfvcToGit.ps1" `
                     -ConfigPath $ConfigPath `
+                    -ServerUrl $SourceServerUrl `
                     -Collection $sourceCollection `
                     -ProjectName $sourceProject `
                     -TfvcPath "`$/$sourceProject" `
@@ -631,9 +652,11 @@ foreach ($group in $grouped) {
                 -SourceCollection $sourceCollection `
                 -SourceProject $sourceProject `
                 -TfvcPath "`$/$sourceProject/$sourceRepo" `
+                -SourceServerUrl $SourceServerUrl `
                 -TargetCollection $TargetCollection `
                 -TargetProject $TargetProject `
                 -TargetRepoName $outputName `
+                -TargetServerUrl $TargetServerUrl `
                 -SkipConversion
 
             $itemDuration = (Get-Date) - $itemStart
@@ -740,6 +763,7 @@ foreach ($group in $grouped) {
                 # Clone directly from the folder's TFVC path — only checks out files in this folder
                 & "$PSScriptRoot/Convert-TfvcToGit.ps1" `
                     -ConfigPath $ConfigPath `
+                    -ServerUrl $SourceServerUrl `
                     -Collection $sourceCollection `
                     -ProjectName $sourceProject `
                     -TfvcPath $folderTfvcPath `
@@ -791,9 +815,11 @@ foreach ($group in $grouped) {
                     -SourceCollection $sourceCollection `
                     -SourceProject $sourceProject `
                     -TfvcPath $folderTfvcPath `
+                    -SourceServerUrl $SourceServerUrl `
                     -TargetCollection $TargetCollection `
                     -TargetProject $TargetProject `
                     -TargetRepoName $folderOutputName `
+                    -TargetServerUrl $TargetServerUrl `
                     -SkipConversion
 
                 $itemDuration = (Get-Date) - $itemStart

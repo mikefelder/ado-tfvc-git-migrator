@@ -40,6 +40,33 @@ function Read-MigrationConfig {
     return $config
 }
 
+function Get-ConfigAdoServerUrl {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Config,
+        [ValidateSet('Source', 'Target')]
+        [string]$Role = 'Source'
+    )
+
+    if ($Role -eq 'Target') {
+        if ($Config.targetAdoServerUrl) {
+            return [string]$Config.targetAdoServerUrl
+        }
+    }
+    else {
+        if ($Config.sourceAdoServerUrl) {
+            return [string]$Config.sourceAdoServerUrl
+        }
+    }
+
+    if ($Config.adoServerUrl) {
+        return [string]$Config.adoServerUrl
+    }
+
+    throw "No ADO server URL configured. Set sourceAdoServerUrl/targetAdoServerUrl (or legacy adoServerUrl)."
+}
+
 # ─── Logging ───────────────────────────────────────────────────────────────────
 
 function Initialize-MigrationLog {
@@ -831,12 +858,16 @@ function Select-AdoProject {
         [hashtable]$Config,
         [Parameter(Mandatory)]
         [string]$Collection,
+        [string]$ServerUrl,
         [string]$Prompt = 'Select a project'
     )
 
     $pat = $Config.collections[$Collection].pat
+    if (-not $ServerUrl) {
+        $ServerUrl = Get-ConfigAdoServerUrl -Config $Config -Role Source
+    }
     Write-Host "  Fetching projects from '$Collection'..." -ForegroundColor DarkGray
-    $projects = Get-AdoProjects -ServerUrl $Config.adoServerUrl -Collection $Collection -Pat $pat
+    $projects = Get-AdoProjects -ServerUrl $ServerUrl -Collection $Collection -Pat $pat
     $projectNames = @($projects.name | Sort-Object)
 
     if ($projectNames.Count -eq 0) {
@@ -866,18 +897,22 @@ function Select-TfvcFolders {
         [string]$Collection,
         [Parameter(Mandatory)]
         [string]$ProjectName,
+        [string]$ServerUrl,
         [string]$ParentPath,
         [switch]$MultiSelect,
         [string]$Prompt = 'Select folder(s)'
     )
 
     $pat = $Config.collections[$Collection].pat
+    if (-not $ServerUrl) {
+        $ServerUrl = Get-ConfigAdoServerUrl -Config $Config -Role Source
+    }
     $rootPath = if ($ParentPath) { $ParentPath } else { "`$/$ProjectName" }
 
     Write-Host "  Fetching TFVC contents under '$rootPath'..." -ForegroundColor DarkGray
 
     try {
-        $items = Get-TfvcItems -ServerUrl $Config.adoServerUrl -Collection $Collection `
+        $items = Get-TfvcItems -ServerUrl $ServerUrl -Collection $Collection `
             -Pat $pat -ScopePath $rootPath -RecursionLevel 1
     }
     catch {
@@ -896,7 +931,7 @@ function Select-TfvcFolders {
     $displayItems = foreach ($folder in $folders) {
         $lastInfo = ''
         try {
-            $cs = Get-TfvcChangesets -ServerUrl $Config.adoServerUrl -Collection $Collection `
+            $cs = Get-TfvcChangesets -ServerUrl $ServerUrl -Collection $Collection `
                 -Pat $pat -ScopePath $folder.path -Top 1
             if ($cs) {
                 $date = ([datetime]$cs[0].createdDate).ToString('yyyy-MM-dd')

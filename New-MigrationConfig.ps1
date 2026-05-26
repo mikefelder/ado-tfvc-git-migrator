@@ -100,6 +100,8 @@ if (Test-Path $ConfigPath) {
 
 if (-not $config) {
     $config = @{
+        sourceAdoServerUrl = ''
+        targetAdoServerUrl = ''
         adoServerUrl      = ''
         collections       = @{}
         outputDirectory   = './output'
@@ -123,20 +125,30 @@ if (-not $config) {
     }
 }
 
-# ─── Step 1: ADO Server ───────────────────────────────────────────────────────
+# ─── Step 1: ADO Server Endpoints ─────────────────────────────────────────────
 
-Show-MenuHeader -Title "Step 1 of 4: ADO Server Connection"
+Show-MenuHeader -Title "Step 1 of 4: ADO Server Endpoints"
 
-Write-Host "  This is the base URL of your Azure DevOps Server 2022 instance." -ForegroundColor DarkGray
-Write-Host "  Example: https://ado.contoso.com" -ForegroundColor DarkGray
+Write-Host "  Configure source and target Azure DevOps endpoints." -ForegroundColor DarkGray
+Write-Host "  Source is usually on-prem ADO Server; target can be ADO Services." -ForegroundColor DarkGray
+Write-Host "  Example source: https://ado.contoso.com" -ForegroundColor DarkGray
+Write-Host "  Example target: https://dev.azure.com" -ForegroundColor DarkGray
 Write-Host ""
 
-$config.adoServerUrl = Read-WithDefault -Prompt 'ADO Server URL' -Default $config.adoServerUrl
+$legacyServer = $config.adoServerUrl
+$sourceDefault = if ($config.sourceAdoServerUrl) { $config.sourceAdoServerUrl } else { $legacyServer }
+$targetDefault = if ($config.targetAdoServerUrl) { $config.targetAdoServerUrl } else { $legacyServer }
 
-if ([string]::IsNullOrWhiteSpace($config.adoServerUrl)) {
-    Write-Host "  ADO Server URL is required. Cannot continue." -ForegroundColor Red
+$config.sourceAdoServerUrl = Read-WithDefault -Prompt 'Source ADO Server URL' -Default $sourceDefault
+$config.targetAdoServerUrl = Read-WithDefault -Prompt 'Target ADO Server URL' -Default $targetDefault
+
+if ([string]::IsNullOrWhiteSpace($config.sourceAdoServerUrl) -or [string]::IsNullOrWhiteSpace($config.targetAdoServerUrl)) {
+    Write-Host "  Source and target server URLs are required. Cannot continue." -ForegroundColor Red
     return
 }
+
+# Keep legacy field for older scripts while newer scripts use source/target URLs.
+$config.adoServerUrl = $config.sourceAdoServerUrl
 
 # ─── Step 2: Collections ──────────────────────────────────────────────────────
 
@@ -185,9 +197,9 @@ while ($addMore) {
     Write-Host ""
 
     # Test connection
-    Write-Host "  Testing connection to '$collName'... " -ForegroundColor DarkGray -NoNewline
+    Write-Host "  Testing connection to '$collName' on source server... " -ForegroundColor DarkGray -NoNewline
     if ($collPat -and $collPat -ne 'YOUR_PAT_HERE') {
-        $testResult = Test-AdoConnection -ServerUrl $config.adoServerUrl -Collection $collName -Pat $collPat
+        $testResult = Test-AdoConnection -ServerUrl $config.sourceAdoServerUrl -Collection $collName -Pat $collPat
         if ($testResult.Connected) {
             Write-Host "Connected! ($($testResult.ProjectCount) projects found)" -ForegroundColor Green
         }
@@ -271,7 +283,8 @@ else {
 Write-Host ""
 Write-Host "  ─── Configuration Summary ─────────────────────────────────" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  ADO Server:     $($config.adoServerUrl)" -ForegroundColor White
+Write-Host "  Source ADO:     $($config.sourceAdoServerUrl)" -ForegroundColor White
+Write-Host "  Target ADO:     $($config.targetAdoServerUrl)" -ForegroundColor White
 Write-Host "  Collections:    $($config.collections.Keys -join ', ')" -ForegroundColor White
 if ($config.github.enterpriseUrl) {
     Write-Host "  GitHub:         $($config.github.enterpriseUrl) (org: $($config.github.defaultOrg))" -ForegroundColor White

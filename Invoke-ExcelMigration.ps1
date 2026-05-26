@@ -1,15 +1,18 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Processes the MDR-4ADO-AllProjects Excel file to batch migrate/split/skip TFVC repos.
+    Processes the MDR-4ADO-AllProjects Excel file to batch migrate/split/skip TFVC repos
+    and mirror existing Git repos in a single second-pass run.
 
 .DESCRIPTION
     Reads the "GAMS-Repos-App-Folder level" worksheet from MDR-4ADO-AllProjects.xlsx
-    and processes each row based on the Recommendation and Repo/Folder columns:
+    and processes each row based on the Recommendation, Repos Type and Repo/Folder columns:
 
-    - Recommendation = "Archive*" → Skip (no migration)
-    - Repo or Folder = "Repo" + Recommendation = "Migrate*" → Convert entire repo from TFVC to Git, move to target
-    - Repo or Folder = "Folder" + Recommendation = "Migrate*" → Spin out folder from parent repo into new Git repo, move to target
+    - Recommendation = "Archive*"                                       → Skip (no migration)
+    - Repo or Folder = "Repo"   + Recommendation = "Migrate*" + TFVC    → Convert entire repo from TFVC to Git, move to -TargetCollection / -TargetProject
+    - Repo or Folder = "Folder" + Recommendation = "Migrate*" + TFVC    → Spin out folder from parent repo into new Git repo, move to -TargetCollection / -TargetProject
+    - Repo or Folder = "Repo"   + Recommendation = "Migrate*" + Git     → Mirror existing Git repo (clone --mirror + push --mirror) into -GitTargetCollection (default 'GAMS-GIT-Repos'); target project defaults to the source project name unless -GitTargetProject is given
+    - Repo or Folder = "Folder" + Recommendation = "Migrate*" + Git     → Skipped with a clear reason (sub-tree extraction from a Git repo is out of scope here)
 
     Each folder is cloned independently from its own TFVC path rather than cloning
     the entire parent repo. This avoids path-too-long failures caused by deeply
@@ -27,10 +30,22 @@
     Worksheet to read. Default: "GAMS-Repos-App-Folder level".
 
 .PARAMETER TargetCollection
-    Target ADO collection to move migrated repos into. Required.
+    Target ADO collection for **TFVC** migrations. Required only if the spreadsheet
+    contains any TFVC rows marked for migration.
 
 .PARAMETER TargetProject
-    Target ADO project to move migrated repos into. Required.
+    Target ADO project for **TFVC** migrations. Required only if the spreadsheet
+    contains any TFVC rows marked for migration.
+
+.PARAMETER GitTargetCollection
+    Target ADO collection / Services org for **Git** mirror rows. Defaults to
+    'GAMS-GIT-Repos'. Must exist in the config. Only used when the spreadsheet
+    has at least one Git source row.
+
+.PARAMETER GitTargetProject
+    Optional target project for **Git** mirror rows. When empty (default), the
+    source project name is preserved and the target project is auto-created if
+    it does not exist.
 
 .PARAMETER ResumeManifest
     Path to a previous migration manifest CSV. Items already marked
@@ -51,9 +66,16 @@
         -ResumeManifest ./output/excel-migration-manifest-20260514-093000.csv
 
 .EXAMPLE
+    # Direct — TFVC rows only
     ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
         -ExcelPath ./excel-docs/MDR-4ADO-AllProjects.xlsx `
         -TargetCollection "ModernApps" -TargetProject "Platform"
+
+.EXAMPLE
+    # Direct — second-pass run for Git-source rows, mirrored into GAMS-GIT-Repos
+    ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
+        -ExcelPath ./excel-docs/MDR-4ADO-AllProjects.xlsx `
+        -GitTargetCollection "GAMS-GIT-Repos"
 #>
 
 [CmdletBinding()]
@@ -68,6 +90,10 @@ param(
     [string]$TargetCollection,
 
     [string]$TargetProject,
+
+    [string]$GitTargetCollection = 'GAMS-GIT-Repos',
+
+    [string]$GitTargetProject,
 
     [string]$ResumeManifest,
 
@@ -236,42 +262,14 @@ if (-not $ExcelPath -or -not (Test-Path $ExcelPath)) {
     return
 }
 
-# ─── Step 2: Choose the Target ────────────────────────────────────────────────
+# ─── Step 2: Read & Analyze the Spreadsheet ──────────────────────────────────
 
 if ($Interactive) {
     Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  Step 2 of 4: Where should migrated repos go?" -ForegroundColor Cyan
+    Write-Host "  Step 2 of 4: Reading the spreadsheet..." -ForegroundColor Cyan
     Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  Repos marked for migration will be moved to a target" -ForegroundColor DarkGray
-    Write-Host "  collection and project. Select them below." -ForegroundColor DarkGray
-    Write-Host ""
 }
-
-if (-not $TargetCollection -and $Interactive) {
-    $TargetCollection = Select-AdoCollection -Config $config -Prompt 'Select the target collection'
-    if (-not $TargetCollection) {
-        Write-Host "  Cancelled." -ForegroundColor Yellow
-        return
-    }
-}
-
-if (-not $TargetProject -and $Interactive) {
-    Write-Host ""
-    Write-Host "  Enter the target project name: " -ForegroundColor Yellow -NoNewline
-    $TargetProject = Read-Host
-    if (-not $TargetProject) {
-        Write-Host "  Cancelled." -ForegroundColor Yellow
-        return
-    }
-}
-
-if (-not $TargetCollection -or -not $TargetProject) {
-    Write-Host "  Target collection and project are required." -ForegroundColor Red
-    return
-}
-
-# ─── Step 3: Read & Analyze the Spreadsheet ───────────────────────────────────
 
 if ($Interactive) {
     Write-Host ""
@@ -395,7 +393,17 @@ foreach ($row in $excelData) {
         [void]$archiveRows.Add($entry)
     }
     elseif ($recommendation -match '(?i)^migrate') {
-        if ($repoOrFolder -eq 'Folder') {
+        $isGit = $reposType -match '(?i)^git'
+
+        if ($repoOrFolder -eq 'Folder' -and $isGit) {
+            # Sub-folder extraction from an existing Git repo is out of scope here —
+            # clone the repo locally and use git filter-repo / git subtree split instead.
+            $entry.Action = 'Skip'
+            $entry.Reason = "Git sub-folder extraction not supported by this script — clone '$repoName' and split '$folderName' manually"
+            $entry.Status = 'Skipped'
+            [void]$skipRows.Add($entry)
+        }
+        elseif ($repoOrFolder -eq 'Folder') {
             $entry.Action = 'SpinOutFolder'
             $entry.NewRepoName = "$($repoName)_$($folderName)" -replace '[^a-zA-Z0-9_-]', '-'
             $entry.Reason = "Extract folder '$folderName' from repo '$repoName' → new repo '$($entry.NewRepoName)'"
@@ -408,14 +416,24 @@ foreach ($row in $excelData) {
             # only add it once; skip duplicate rows for the same Collection/Project/Repo.
             $repoKey = "$($collection)|$($project)|$($repoName)"
             $alreadyAdded = $migrateRows | Where-Object {
-                $_.Action -eq 'MigrateRepo' -and
+                $_.Action -in @('MigrateRepo', 'MirrorGitRepo') -and
                 "$($_.Collection)|$($_.Project)|$($_.Repo)" -eq $repoKey
             }
             if ($alreadyAdded) {
                 $entry.Action = 'Skip'
-                $entry.Reason = "Duplicate row — repo '$repoName' is already queued for full migration"
+                $entry.Reason = "Duplicate row — repo '$repoName' is already queued for migration"
                 $entry.Status = 'Skipped'
                 [void]$skipRows.Add($entry)
+            }
+            elseif ($isGit) {
+                # Existing Git repo → mirror it (clone --mirror + push --mirror) into
+                # the Git target collection. Target project defaults to the source
+                # project name and is auto-created if it doesn't already exist.
+                $entry.Action = 'MirrorGitRepo'
+                $entry.NewRepoName = $repoName -replace '[^a-zA-Z0-9_-]', '-'
+                $entry.Reason = "Mirror existing Git repo '$repoName' from $collection/$project → $GitTargetCollection"
+                $entry.Status = 'Pending'
+                [void]$migrateRows.Add($entry)
             }
             else {
                 $entry.Action = 'MigrateRepo'
@@ -453,10 +471,96 @@ foreach ($kvp in $nameCount.GetEnumerator()) {
         }
     }
 }
+
+# ─── Step 3: Choose Target(s) — conditional on what was classified ───────────
+#
+# Only prompt / require targets for the kinds of work the spreadsheet actually
+# has. A pure TFVC pass doesn't need a Git target; a pure Git mirror pass
+# doesn't need a TFVC target.
+
+$tfvcWorkItems = @($migrateRows | Where-Object { $_.Action -in @('MigrateRepo', 'SpinOutFolder') })
+$gitMirrorItems = @($migrateRows | Where-Object { $_.Action -eq 'MirrorGitRepo' })
+
+if ($Interactive -and ($tfvcWorkItems.Count -gt 0 -or $gitMirrorItems.Count -gt 0)) {
+    Write-Host ""
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "  Step 3 of 4: Where should migrated repos go?" -ForegroundColor Cyan
+    Write-Host "  ─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+# TFVC target — only if there are TFVC migrations or folder spin-outs queued
+if ($tfvcWorkItems.Count -gt 0) {
+    if ($Interactive) {
+        Write-Host "  TFVC conversions ($($tfvcWorkItems.Count) item(s)) need a target collection + project." -ForegroundColor White
+        Write-Host ""
+    }
+
+    if (-not $TargetCollection -and $Interactive) {
+        $TargetCollection = Select-AdoCollection -Config $config -Prompt 'Select the target collection for TFVC migrations'
+        if (-not $TargetCollection) {
+            Write-Host "  Cancelled." -ForegroundColor Yellow
+            return
+        }
+    }
+
+    if (-not $TargetProject -and $Interactive) {
+        Write-Host ""
+        Write-Host "  Enter the target project name for TFVC migrations: " -ForegroundColor Yellow -NoNewline
+        $TargetProject = Read-Host
+        if (-not $TargetProject) {
+            Write-Host "  Cancelled." -ForegroundColor Yellow
+            return
+        }
+    }
+
+    if (-not $TargetCollection -or -not $TargetProject) {
+        Write-Host "  -TargetCollection and -TargetProject are required when the spreadsheet contains TFVC migration rows." -ForegroundColor Red
+        return
+    }
+}
+
+# Git target — only if there are Git mirror rows queued
+if ($gitMirrorItems.Count -gt 0) {
+    if ($Interactive) {
+        Write-Host ""
+        Write-Host "  Existing Git repos ($($gitMirrorItems.Count) item(s)) will be mirrored into a target collection." -ForegroundColor White
+        Write-Host "  Source project names are preserved by default and auto-created if missing." -ForegroundColor DarkGray
+        Write-Host ""
+
+        $gitDefault = if ($GitTargetCollection) { $GitTargetCollection } else { 'GAMS-GIT-Repos' }
+        Write-Host "  Git target collection [default: $gitDefault]: " -ForegroundColor Yellow -NoNewline
+        $entered = Read-Host
+        if ($entered) { $GitTargetCollection = $entered.Trim() }
+        else { $GitTargetCollection = $gitDefault }
+
+        if (-not $GitTargetProject) {
+            Write-Host "  Git target project (blank = preserve each source project name): " -ForegroundColor Yellow -NoNewline
+            $enteredProj = Read-Host
+            if ($enteredProj) { $GitTargetProject = $enteredProj.Trim() }
+        }
+    }
+
+    if (-not $GitTargetCollection) {
+        Write-Host "  -GitTargetCollection is required (default 'GAMS-GIT-Repos') when the spreadsheet contains Git mirror rows." -ForegroundColor Red
+        return
+    }
+
+    if (-not $config.collections.ContainsKey($GitTargetCollection)) {
+        Write-Host ""
+        Write-Host "  ✗ Git target collection '$GitTargetCollection' is not in your configuration." -ForegroundColor Red
+        Write-Host "    Add it with the Setup Wizard (option 1 on the main menu) and ensure its PAT" -ForegroundColor Yellow
+        Write-Host "    has Code (Read & Write) AND Project and Team (Read, Write & Manage) scopes." -ForegroundColor Yellow
+        Write-Host ""
+        return
+    }
+}
+
 # ─── Show the Preview ─────────────────────────────────────────────────────────
 
 $repoMigrations = @($migrateRows | Where-Object { $_.Action -eq 'MigrateRepo' })
 $folderSpinouts = @($migrateRows | Where-Object { $_.Action -eq 'SpinOutFolder' })
+$gitMirrors = @($migrateRows | Where-Object { $_.Action -eq 'MirrorGitRepo' })
 $tfvcConversions = @($migrateRows | Where-Object { $_.RepoType -eq 'TFVC' })
 
 Write-Host ""
@@ -471,7 +575,10 @@ if ($repoMigrations.Count -gt 0) {
     Write-Host "        ├─ $($repoMigrations.Count) full repo migration(s)" -ForegroundColor DarkGray
 }
 if ($folderSpinouts.Count -gt 0) {
-    Write-Host "        └─ $($folderSpinouts.Count) folder(s) will be extracted into standalone repos" -ForegroundColor DarkGray
+    Write-Host "        ├─ $($folderSpinouts.Count) folder(s) will be extracted into standalone repos" -ForegroundColor DarkGray
+}
+if ($gitMirrors.Count -gt 0) {
+    Write-Host "        └─ $($gitMirrors.Count) existing Git repo(s) will be mirrored (clone --mirror / push --mirror)" -ForegroundColor DarkGray
 }
 if ($tfvcConversions.Count -gt 0) {
     Write-Host "        ($($tfvcConversions.Count) of these need to be converted from TFVC to Git format)" -ForegroundColor DarkGray
@@ -479,7 +586,13 @@ if ($tfvcConversions.Count -gt 0) {
 Write-Host "    ● $($archiveRows.Count) repositories are marked for archive (will be skipped)" -ForegroundColor Yellow
 Write-Host "    ● $($skipRows.Count) rows will be skipped (system folders, missing data, etc.)" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "    Destination: $TargetCollection / $TargetProject" -ForegroundColor White
+if ($tfvcWorkItems.Count -gt 0) {
+    Write-Host "    TFVC destination: $TargetCollection / $TargetProject" -ForegroundColor White
+}
+if ($gitMirrors.Count -gt 0) {
+    $gitProjLabel = if ($GitTargetProject) { $GitTargetProject } else { '<preserve source project>' }
+    Write-Host "    Git mirror destination: $GitTargetCollection / $gitProjLabel" -ForegroundColor White
+}
 Write-Host ""
 
 # Show data warnings
@@ -507,6 +620,10 @@ foreach ($grp in $migrateByCollection) {
         if ($item.Action -eq 'MigrateRepo') {
             $typeNote = if ($item.RepoType -eq 'TFVC') { ' [convert to Git]' } else { '' }
             Write-Host "    → Migrate repo: $($item.Project)/$($item.Repo)$typeNote" -ForegroundColor DarkGray
+        }
+        elseif ($item.Action -eq 'MirrorGitRepo') {
+            $tgtProj = if ($GitTargetProject) { $GitTargetProject } else { $item.Project }
+            Write-Host "    → Mirror Git repo: $($item.Project)/$($item.Repo) → $GitTargetCollection/$tgtProj/$($item.NewRepoName)" -ForegroundColor DarkGray
         }
         else {
             Write-Host "    → Extract folder: $($item.Project)/$($item.Repo)/$($item.Folder) → new repo '$($item.NewRepoName)'" -ForegroundColor DarkGray
@@ -569,7 +686,16 @@ if ($Interactive) {
     if ($folderSpinouts.Count -gt 0) {
         Write-Host "  │    • Extract $($folderSpinouts.Count.ToString().PadRight(4)) folders into standalone repos      │" -ForegroundColor Yellow
     }
-    Write-Host "  │    • Move them to: $($TargetCollection)/$($TargetProject)".PadRight(37) + "│" -ForegroundColor Yellow
+    if ($gitMirrors.Count -gt 0) {
+        Write-Host "  │    • Mirror $($gitMirrors.Count.ToString().PadRight(4)) existing Git repos                   │" -ForegroundColor Yellow
+    }
+    if ($tfvcWorkItems.Count -gt 0) {
+        Write-Host "  │    • TFVC dest: $($TargetCollection)/$($TargetProject)".PadRight(60) + "│" -ForegroundColor Yellow
+    }
+    if ($gitMirrors.Count -gt 0) {
+        $gitProjLabel2 = if ($GitTargetProject) { $GitTargetProject } else { '<keep source>' }
+        Write-Host "  │    • Git dest:  $($GitTargetCollection)/$gitProjLabel2".PadRight(60) + "│" -ForegroundColor Yellow
+    }
     Write-Host "  │                                                          │" -ForegroundColor Yellow
     Write-Host "  │  This may take a while for large repositories.           │" -ForegroundColor Yellow
     Write-Host "  │                                                          │" -ForegroundColor Yellow
@@ -910,6 +1036,184 @@ foreach ($group in $grouped) {
                 $failCount++
                 Write-Host "    ✗ Failed: $($item.Error)" -ForegroundColor Red
                 Write-MigrationLog -Message "Failed to move '$folderName': $($_.Exception.Message)" -LogFile $logFile -Level ERROR
+            }
+        }
+    }
+
+    # ── Git Mirror (existing Git repos → GAMS-GIT-Repos collection) ──
+    # For rows with RepoType=Git + Recommendation=Migrate, perform a
+    # `git clone --mirror` + `git push --mirror` from the source collection
+    # to the configured Git target collection. Target project defaults to
+    # the source project name and is auto-created if missing.
+    $gitItems = @($group.Group | Where-Object { $_.Action -eq 'MirrorGitRepo' })
+
+    foreach ($item in $gitItems) {
+        $processedCount++
+        $itemStart = Get-Date
+        $pctComplete = [math]::Round(($processedCount / $migrateRows.Count) * 100)
+        $etaStr = ''
+        if ($processedCount -gt 1) {
+            $avgSec = ((Get-Date) - $startTime).TotalSeconds / ($processedCount - 1)
+            $remainingSec = $avgSec * ($migrateRows.Count - $processedCount + 1)
+            $eta = (Get-Date).AddSeconds($remainingSec)
+            $etaStr = " | ETA: $($eta.ToString('HH:mm:ss'))"
+        }
+
+        $outputName = $item.NewRepoName
+        $targetProjectName = if ($GitTargetProject) { $GitTargetProject } else { $sourceProject }
+
+        Write-Host ""
+        Write-Host "  [$processedCount / $($migrateRows.Count)] ($pctComplete%)$etaStr" -ForegroundColor Cyan
+        Write-Host "    Mirroring Git repo: $sourceCollection / $sourceProject / $sourceRepo" -ForegroundColor White
+        Write-Host "                    →  $GitTargetCollection / $targetProjectName / $outputName" -ForegroundColor DarkGray
+        Write-MigrationLog -Message "[$processedCount/$($migrateRows.Count)] Mirror start: $sourceCollection/$sourceProject/$sourceRepo → $GitTargetCollection/$targetProjectName/$outputName" -LogFile $logFile -Level INFO
+
+        $localBare = $null
+        try {
+            # Resolve source + target endpoints (each may live on a different
+            # ADO server thanks to per-collection serverUrl overrides).
+            $sourceServerUrl = Get-CollectionServerUrl -Config $config -Collection $sourceCollection
+            $sourcePat       = $pat   # already resolved above for this $group
+            $targetServerUrl = Get-CollectionServerUrl -Config $config -Collection $GitTargetCollection
+            $targetPat       = $config.collections[$GitTargetCollection].pat
+            if (-not $targetPat -or $targetPat -eq 'YOUR_PAT_HERE') {
+                throw "PAT for Git target collection '$GitTargetCollection' is not set in config."
+            }
+
+            # 1. Resolve the source Git repo (we need its remoteUrl).
+            $srcRepo = Get-AdoGitRepository -ServerUrl $sourceServerUrl `
+                -Collection $sourceCollection -ProjectIdOrName $sourceProject `
+                -RepoName $sourceRepo -Pat $sourcePat
+            if (-not $srcRepo) {
+                throw "Source Git repo '$sourceRepo' not found in $sourceCollection/$sourceProject."
+            }
+
+            # 2. Ensure the target project exists (create if missing).
+            $tgtProj = Get-AdoTeamProject -ServerUrl $targetServerUrl `
+                -Collection $GitTargetCollection -Name $targetProjectName -Pat $targetPat
+            if (-not $tgtProj) {
+                Write-Host "    Creating target project '$targetProjectName' in $GitTargetCollection..." -ForegroundColor DarkGray
+                Write-MigrationLog -Message "Creating target project '$targetProjectName' in $GitTargetCollection" -LogFile $logFile -Level INFO
+                $tgtProj = New-AdoTeamProject -ServerUrl $targetServerUrl `
+                    -Collection $GitTargetCollection -Pat $targetPat `
+                    -Name $targetProjectName `
+                    -Description "Mirrored from $sourceCollection/$sourceProject by Invoke-ExcelMigration.ps1" `
+                    -LogFile $logFile
+            }
+
+            # 3. Ensure the target repo exists (create if missing; tolerate 409).
+            $tgtRepo = Get-AdoGitRepository -ServerUrl $targetServerUrl `
+                -Collection $GitTargetCollection -ProjectIdOrName $tgtProj.id `
+                -RepoName $outputName -Pat $targetPat
+            if (-not $tgtRepo) {
+                try {
+                    $tgtRepo = New-AdoGitRepository -ServerUrl $targetServerUrl `
+                        -Collection $GitTargetCollection -ProjectId $tgtProj.id `
+                        -Name $outputName -Pat $targetPat
+                    Write-MigrationLog -Message "Created target repo '$outputName' in $GitTargetCollection/$targetProjectName" -LogFile $logFile -Level SUCCESS
+                }
+                catch {
+                    if ($_.Exception.Message -match '409|already exists|TF400898') {
+                        $tgtRepo = Get-AdoGitRepository -ServerUrl $targetServerUrl `
+                            -Collection $GitTargetCollection -ProjectIdOrName $tgtProj.id `
+                            -RepoName $outputName -Pat $targetPat
+                        if (-not $tgtRepo) { throw }
+                    }
+                    else { throw }
+                }
+            }
+            else {
+                Write-MigrationLog -Message "Target repo '$outputName' already exists in $GitTargetCollection/$targetProjectName — mirroring will overwrite refs" -LogFile $logFile -Level WARN
+            }
+
+            # 4. Clone --mirror locally, then push --mirror to the target.
+            $localBare = Join-Path $config.outputDirectory ("{0}.git" -f $outputName)
+            if (Test-Path $localBare) {
+                Remove-Item -Recurse -Force $localBare -ErrorAction SilentlyContinue
+            }
+
+            $srcAuth = Add-PatToGitUrl -Url $srcRepo.remoteUrl -Pat $sourcePat
+            $tgtAuth = Add-PatToGitUrl -Url $tgtRepo.remoteUrl -Pat $targetPat
+
+            Invoke-GitMirror `
+                -Arguments "clone --mirror `"$srcAuth`" `"$localBare`"" `
+                -LogFile $logFile `
+                -StatusLabel 'Cloning (mirror)' `
+                -TimeoutMinutes $cfgTimeoutMin `
+                -StallTimeoutMinutes $cfgStallMin | Out-Null
+
+            Invoke-GitMirror `
+                -Arguments "push --mirror `"$tgtAuth`"" `
+                -WorkingDirectory $localBare `
+                -LogFile $logFile `
+                -StatusLabel 'Pushing (mirror)' `
+                -TimeoutMinutes $cfgTimeoutMin `
+                -StallTimeoutMinutes $cfgStallMin | Out-Null
+
+            $itemDuration = (Get-Date) - $itemStart
+            $item.Status = 'Success'
+            $successCount++
+            Write-Host "    ✓ Done ($($itemDuration.ToString('hh\:mm\:ss')))" -ForegroundColor Green
+            Write-MigrationLog -Message "Successfully mirrored '$sourceRepo' in $($itemDuration.ToString('hh\:mm\:ss'))" -LogFile $logFile -Level SUCCESS
+
+            # Update spreadsheet column H to mark as completed
+            $rowsToMark = @($item.ExcelRow)
+            $skipRows | Where-Object {
+                $_.Collection -eq $item.Collection -and
+                $_.Project -eq $item.Project -and
+                $_.Repo -eq $item.Repo -and
+                $_.Reason -match 'Duplicate row'
+            } | ForEach-Object { $rowsToMark += $_.ExcelRow }
+
+            try {
+                $pkg = Open-ExcelPackage -Path $ExcelPath
+                $ws = $pkg.Workbook.Worksheets[$WorksheetName]
+                foreach ($excelRow in $rowsToMark) {
+                    $ws.Cells[$excelRow, $recommendationCol].Value = 'completed'
+                }
+                Close-ExcelPackage $pkg -SaveAs $ExcelPath
+                Write-MigrationLog -Message "Updated $($rowsToMark.Count) Excel row(s) Recommendation -> 'completed'" -LogFile $logFile -Level INFO
+            }
+            catch {
+                Write-MigrationLog -Message "Could not update Excel: $($_.Exception.Message)" -LogFile $logFile -Level WARN
+                Write-Host "    * Could not update spreadsheet (file may be open elsewhere)" -ForegroundColor Yellow
+            }
+
+            # Clean up local bare clone to free disk space
+            if (Test-Path $localBare) {
+                Remove-Item -Recurse -Force $localBare -ErrorAction SilentlyContinue
+                Write-MigrationLog -Message "Cleaned up local bare clone: $localBare" -LogFile $logFile -Level INFO
+                Write-Host "    - Cleaned up local bare clone" -ForegroundColor DarkGray
+            }
+        }
+        catch {
+            $errMsg = $_.Exception.Message
+            $friendlyErr = Get-FriendlyError -ErrorMessage $errMsg
+
+            if ($errMsg -match 'too long|PathTooLong|260 char') {
+                $item.Status = 'PathTooLong'
+                $item.Error = "Local bare-clone path exceeded Windows' limit. Try a shorter outputDirectory."
+                Write-Host "    ✗ PATH TOO LONG — $sourceRepo" -ForegroundColor Red
+            }
+            elseif ($errMsg -match 'TIMED OUT|timed out|STALL|stalled') {
+                $item.Status = 'TimedOut'
+                $item.Error = "Mirror operation timed out or stalled. Skipped to unblock remaining items."
+                $skippedStuckCount++
+                Write-Host "    ✗ TIMED OUT / STUCK — $sourceRepo (skipping to next item)" -ForegroundColor Magenta
+                Write-MigrationLog -Message "SKIPPED (timeout/stall): mirror '$sourceRepo' — moving on" -LogFile $logFile -Level WARN
+            }
+            else {
+                $item.Status = 'Failed'
+                $item.Error = $friendlyErr
+                Write-Host "    ✗ Failed: $friendlyErr" -ForegroundColor Red
+            }
+
+            $failCount++
+            Write-MigrationLog -Message "Failed to mirror '$sourceRepo': $errMsg" -LogFile $logFile -Level ERROR
+
+            # Best-effort cleanup so a failed mirror doesn't leave a half-baked bare clone behind.
+            if ($localBare -and (Test-Path $localBare)) {
+                Remove-Item -Recurse -Force $localBare -ErrorAction SilentlyContinue
             }
         }
     }

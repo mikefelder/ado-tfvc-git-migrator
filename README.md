@@ -34,8 +34,9 @@ No need to remember parameter names or edit JSON by hand.
 
 The primary workflow for McDermott's migration. Reads the **MDR-4ADO-AllProjects.xlsx** spreadsheet ("GAMS-Repos-App-Folder level" worksheet) and processes every row:
 
-- **Column G = "Repo" + Recommendation = "Migrate"** → Converts the entire TFVC repo to Git as-is. If multiple spreadsheet rows reference the same repo (one per subfolder), it's only migrated once.
-- **Column G = "Folder" + Recommendation = "Migrate"** → Extracts that folder from the parent repo into a standalone Git repo named `RepoName_FolderName`. All folders from the same parent are extracted in a single batch.
+- **Column G = "Repo" + Recommendation = "Migrate" + Repos Type = "TFVC"** → Converts the entire TFVC repo to Git as-is. If multiple spreadsheet rows reference the same repo (one per subfolder), it's only migrated once.
+- **Column G = "Repo" + Recommendation = "Migrate" + Repos Type = "Git"** → Mirrors the existing Git repo (`git clone --mirror` + `git push --mirror`) from the source collection straight into the **Git target collection** (default `GAMS-GIT-Repos`). Target projects are auto-created if missing; the source project name is preserved unless you pass `-GitTargetProject`. This is the second-pass mode for the rows that were previously skipped because they were already Git.
+- **Column G = "Folder" + Recommendation = "Migrate"** → Extracts that folder from the parent repo into a standalone Git repo named `RepoName_FolderName`. All folders from the same parent are extracted in a single batch. Git-source folder rows are skipped with a clear reason (sub-tree extraction from an existing Git repo is out of scope — clone and split it manually if you need that).
 - **Recommendation = "Archive"** → Skipped (not migrated).
 - **Collections not in your config** → Silently ignored (only collections you've set up with PATs are processed).
 
@@ -55,20 +56,28 @@ During batch execution, the migration runner now also:
 - Marks stuck items as `TimedOut`, logs them, and continues with the rest of the batch
 
 ```powershell
-# Interactive (recommended)
+# Interactive (recommended) — prompts for TFVC target and (if Git rows exist) Git target
 ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json -Interactive
 
-# Direct
+# Direct — TFVC rows only
 ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
     -ExcelPath ./excel-docs/MDR-4ADO-AllProjects.xlsx `
     -TargetCollection "ModernApps" -TargetProject "Platform"
 
-# Direct with explicit timeout controls
+# Direct — second-pass run for Git-source rows, mirrored into GAMS-GIT-Repos
+./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
+    -ExcelPath ./excel-docs/MDR-4ADO-AllProjects.xlsx `
+    -GitTargetCollection "GAMS-GIT-Repos"
+
+# Direct — process both kinds in one pass with explicit timeout controls
 ./Invoke-ExcelMigration.ps1 -ConfigPath ./config/migration-config.json `
     -ExcelPath ./excel-docs/MDR-4ADO-AllProjects.xlsx `
     -TargetCollection "ModernApps" -TargetProject "Platform" `
+    -GitTargetCollection "GAMS-GIT-Repos" `
     -TimeoutMinutes 120 -StallTimeoutMinutes 30
 ```
+
+> **Note:** The Git target collection must already exist in your config. The PAT on that entry needs **Code (Read & Write)** and **Project and Team (Read, Write & Manage)** so the script can auto-create missing target projects and Git repos. Each Git row is marked `completed` in column H of the spreadsheet on success, exactly like the TFVC path.
 
 ## Batch Archive (Option 10)
 
@@ -280,7 +289,7 @@ Run `Install-Prerequisites.ps1` (or pick option **[2]** from the main menu) to v
 
 You can create the config file in two ways:
 
-1. **Setup wizard** — run `./New-MigrationConfig.ps1` or pick option **[1]** from the main menu. It walks you through each setting and tests your ADO connections.
+1. **Setup wizard** — run `./New-MigrationConfig.ps1` or pick option **[1]** from the main menu. It walks you through each setting and tests your ADO connections. For every collection you add, the wizard asks **“Is this an Azure DevOps Services org (hosted at `https://dev.azure.com/<name>`)?”** — answer `y` to store a `serverUrl` override (e.g. for `MDR-GAMS-ADO`), or accept the default `n` to keep using the on-prem `adoServerUrl`. Existing Services-org entries default to **Y** when you re-run the wizard so updates don’t silently demote them back to on-prem.
 2. **Manual** — copy [`config/migration-config.example.json`](config/migration-config.example.json) to `config/migration-config.json` and edit it.
 
 Key settings:

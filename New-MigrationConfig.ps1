@@ -140,29 +140,33 @@ if ([string]::IsNullOrWhiteSpace($config.adoServerUrl)) {
 
 # ─── Step 2: Collections ──────────────────────────────────────────────────────
 
-Show-MenuHeader -Title "Step 2 of 4: ADO Collections"
+Show-MenuHeader -Title "Step 2 of 4: ADO Collections / Services Orgs"
 
-Write-Host "  Each ADO collection needs a name and a Personal Access Token (PAT)." -ForegroundColor DarkGray
+Write-Host "  Add each ADO endpoint you want to talk to. Two types are supported:" -ForegroundColor DarkGray
+Write-Host "    • A collection on the on-prem ADO Server above (e.g. 'GAMS-GIT-Repos')" -ForegroundColor DarkGray
+Write-Host "    • An Azure DevOps Services organization (e.g. 'MDR-GAMS-ADO' at https://dev.azure.com)" -ForegroundColor DarkGray
+Write-Host ""
 Write-Host "  PATs can be created in ADO under your profile → Security → Personal Access Tokens." -ForegroundColor DarkGray
-Write-Host "  Required scopes: Code (Read & Write), Project and Team (Read)." -ForegroundColor DarkGray
+Write-Host "  Required scopes: Code (Read & Write), Project and Team (Read; Write & Manage for mirror targets)." -ForegroundColor DarkGray
 Write-Host ""
 
 if ($config.collections.Count -gt 0) {
     Write-Host "  Current collections:" -ForegroundColor White
     foreach ($name in $config.collections.Keys | Sort-Object) {
-        $desc = $config.collections[$name].description
-        $patStatus = if ($config.collections[$name].pat -and $config.collections[$name].pat -ne 'YOUR_PAT_HERE') { 'PAT set' } else { 'PAT needed' }
-        Write-Host "    • $name ($patStatus)" -ForegroundColor DarkGray
+        $entry = $config.collections[$name]
+        $patStatus = if ($entry.pat -and $entry.pat -ne 'YOUR_PAT_HERE') { 'PAT set' } else { 'PAT needed' }
+        $kind = if ($entry.serverUrl) { "Services org @ $($entry.serverUrl)" } else { 'on-prem collection' }
+        Write-Host "    • $name ($kind, $patStatus)" -ForegroundColor DarkGray
     }
     Write-Host ""
 }
 
 $addMore = $true
 while ($addMore) {
-    $collName = Read-WithDefault -Prompt 'Add a collection — enter its name (or press Enter if done adding collections)'
+    $collName = Read-WithDefault -Prompt 'Add a collection / Services org name (or press Enter if done)'
     if ([string]::IsNullOrWhiteSpace($collName)) {
         if ($config.collections.Count -eq 0) {
-            Write-Host "  You need at least one collection. Please enter a name." -ForegroundColor Red
+            Write-Host "  You need at least one collection or Services org. Please enter a name." -ForegroundColor Red
             continue
         }
         $addMore = $false
@@ -172,22 +176,50 @@ while ($addMore) {
     $existing = $config.collections[$collName]
     $existingPat = if ($existing) { $existing.pat } else { '' }
     $existingDesc = if ($existing) { $existing.description } else { '' }
+    $existingServerUrl = if ($existing) { [string]$existing.serverUrl } else { '' }
+
+    # Is this an Azure DevOps Services org? Default Yes if it already had a serverUrl override.
+    $servicesDefault = [bool]$existingServerUrl
+    $servicesHint = if ($servicesDefault) { '[Y/n]' } else { '[y/N]' }
+    Write-Host "  Is '$collName' an Azure DevOps Services org (hosted at https://dev.azure.com/$collName)? $servicesHint : " -ForegroundColor Yellow -NoNewline
+    $isServicesInput = Read-Host
+    $isServices = if ([string]::IsNullOrWhiteSpace($isServicesInput)) {
+        $servicesDefault
+    }
+    else {
+        $isServicesInput.Trim() -match '^[Yy]'
+    }
+
+    if ($isServices) {
+        $defaultServicesUrl = if ($existingServerUrl) { $existingServerUrl } else { 'https://dev.azure.com' }
+        $collServerUrl = Read-WithDefault -Prompt 'Services base URL' -Default $defaultServicesUrl
+        $collServerUrl = $collServerUrl.TrimEnd('/')
+    }
+    else {
+        $collServerUrl = $null
+    }
 
     $collPat = Read-SecureValue -Prompt "PAT for '$collName'" -Current $existingPat
     $collDesc = Read-WithDefault -Prompt "Description for '$collName' (optional)" -Default $existingDesc
 
-    $config.collections[$collName] = @{
+    $entryHash = @{
         pat         = $collPat
         description = $collDesc
     }
+    if ($collServerUrl) {
+        $entryHash.serverUrl = $collServerUrl
+    }
+    $config.collections[$collName] = $entryHash
 
-    Write-Host "  ✓ Collection '$collName' configured." -ForegroundColor Green
+    $kindLabel = if ($collServerUrl) { "Services org @ $collServerUrl" } else { 'on-prem collection' }
+    Write-Host "  ✓ '$collName' configured ($kindLabel)." -ForegroundColor Green
     Write-Host ""
 
-    # Test connection
-    Write-Host "  Testing connection to '$collName'... " -ForegroundColor DarkGray -NoNewline
-    if ($collPat -and $collPat -ne 'YOUR_PAT_HERE') {
-        $testResult = Test-AdoConnection -ServerUrl $config.adoServerUrl -Collection $collName -Pat $collPat
+    # Test connection — use the per-collection serverUrl if set, else the top-level adoServerUrl.
+    $effectiveServerUrl = if ($collServerUrl) { $collServerUrl } else { $config.adoServerUrl }
+    Write-Host "  Testing connection to '$effectiveServerUrl/$collName'... " -ForegroundColor DarkGray -NoNewline
+    if ($collPat -and $collPat -ne 'YOUR_PAT_HERE' -and $effectiveServerUrl) {
+        $testResult = Test-AdoConnection -ServerUrl $effectiveServerUrl -Collection $collName -Pat $collPat
         if ($testResult.Connected) {
             Write-Host "Connected! ($($testResult.ProjectCount) projects found)" -ForegroundColor Green
         }
@@ -197,7 +229,7 @@ while ($addMore) {
         }
     }
     else {
-        Write-Host "Skipped (no PAT provided)" -ForegroundColor Yellow
+        Write-Host "Skipped (no PAT or server URL provided)" -ForegroundColor Yellow
     }
     Write-Host ""
 }
@@ -272,7 +304,11 @@ Write-Host ""
 Write-Host "  ─── Configuration Summary ─────────────────────────────────" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  ADO Server:     $($config.adoServerUrl)" -ForegroundColor White
-Write-Host "  Collections:    $($config.collections.Keys -join ', ')" -ForegroundColor White
+$collSummary = ($config.collections.Keys | Sort-Object | ForEach-Object {
+    $e = $config.collections[$_]
+    if ($e.serverUrl) { "$_ (Services)" } else { $_ }
+}) -join ', '
+Write-Host "  Collections:    $collSummary" -ForegroundColor White
 if ($config.github.enterpriseUrl) {
     Write-Host "  GitHub:         $($config.github.enterpriseUrl) (org: $($config.github.defaultOrg))" -ForegroundColor White
 }

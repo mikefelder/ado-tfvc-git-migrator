@@ -46,6 +46,18 @@
             "gitHubOrg": "Contoso",
             "gitHubRepo": "component",
             "description": "Moved from GAMS to ModernApps, then to GitHub"
+        },
+        {
+            "name": "Existing Git Repo — Move to GAMS-GIT-Repos",
+            "type": "move",
+            "sourceCollection": "LegacyApps",
+            "sourceProject": "SharedServices",
+            "sourceRepoType": "Git",
+            "sourceRepoName": "billing-api",
+            "targetCollection": "GAMS-GIT-Repos",
+            "targetProject": "SharedServices",
+            "targetRepoName": "billing-api",
+            "description": "Moves an existing Git repo between ADO collections without TFVC conversion"
         }
     ]
 }

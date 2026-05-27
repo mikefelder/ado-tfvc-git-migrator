@@ -1,15 +1,16 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Processes the MDR-4ADO-AllProjects Excel file to batch migrate/split/skip TFVC repos.
+    Processes the MDR-4ADO-AllProjects Excel file to batch migrate/split/skip TFVC and Git repos.
 
 .DESCRIPTION
     Reads the "GAMS-Repos-App-Folder level" worksheet from MDR-4ADO-AllProjects.xlsx
-    and processes each row based on the Recommendation and Repo/Folder columns:
+    and processes each row based on the Recommendation, Repo Type, and Repo/Folder columns:
 
     - Recommendation = "Archive*" → Skip (no migration)
-    - Repo or Folder = "Repo" + Recommendation = "Migrate*" → Convert entire repo from TFVC to Git, move to target
-    - Repo or Folder = "Folder" + Recommendation = "Migrate*" → Spin out folder from parent repo into new Git repo, move to target
+    - Repo or Folder = "Repo" + Recommendation = "Migrate*" → Convert TFVC repos to Git, or mirror existing Git repos, then move to target
+    - Repo or Folder = "Folder" + Recommendation = "Migrate*" + Repo Type = "TFVC" → Spin out folder from parent repo into new Git repo, move to target
+    - Repo or Folder = "Folder" + Recommendation = "Migrate*" + Repo Type = "Git" → Skip (folder-level Git split is not supported)
 
     Each folder is cloned independently from its own TFVC path rather than cloning
     the entire parent repo. This avoids path-too-long failures caused by deeply
@@ -365,11 +366,19 @@ foreach ($row in $excelData) {
     }
     elseif ($recommendation -match '(?i)^migrate') {
         if ($repoOrFolder -eq 'Folder') {
-            $entry.Action = 'SpinOutFolder'
-            $entry.NewRepoName = "$($repoName)_$($folderName)" -replace '[^a-zA-Z0-9_-]', '-'
-            $entry.Reason = "Extract folder '$folderName' from repo '$repoName' → new repo '$($entry.NewRepoName)'"
-            $entry.Status = 'Pending'
-            [void]$migrateRows.Add($entry)
+            if ($reposType -eq 'Git') {
+                $entry.Action = 'Skip'
+                $entry.Reason = "Git repo folder rows are not supported for spin-out; migrate the whole repo row instead"
+                $entry.Status = 'Skipped'
+                [void]$skipRows.Add($entry)
+            }
+            else {
+                $entry.Action = 'SpinOutFolder'
+                $entry.NewRepoName = "$($repoName)_$($folderName)" -replace '[^a-zA-Z0-9_-]', '-'
+                $entry.Reason = "Extract folder '$folderName' from repo '$repoName' → new repo '$($entry.NewRepoName)'"
+                $entry.Status = 'Pending'
+                [void]$migrateRows.Add($entry)
+            }
         }
         else {
             # "Repo" means migrate the entire repo as one unit.
@@ -389,7 +398,12 @@ foreach ($row in $excelData) {
             else {
                 $entry.Action = 'MigrateRepo'
                 $entry.NewRepoName = $repoName -replace '[^a-zA-Z0-9_-]', '-'
-                $entry.Reason = "Migrate entire repo '$repoName' to Git"
+                $entry.Reason = if ($reposType -eq 'Git') {
+                    "Mirror existing Git repo '$repoName' into target collection"
+                }
+                else {
+                    "Migrate entire repo '$repoName' to Git"
+                }
                 $entry.Status = 'Pending'
                 [void]$migrateRows.Add($entry)
             }
@@ -427,6 +441,7 @@ foreach ($kvp in $nameCount.GetEnumerator()) {
 $repoMigrations = @($migrateRows | Where-Object { $_.Action -eq 'MigrateRepo' })
 $folderSpinouts = @($migrateRows | Where-Object { $_.Action -eq 'SpinOutFolder' })
 $tfvcConversions = @($migrateRows | Where-Object { $_.RepoType -eq 'TFVC' })
+$gitMoves = @($repoMigrations | Where-Object { $_.RepoType -eq 'Git' })
 
 Write-Host ""
 Write-Host "  ╔═══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
@@ -444,6 +459,9 @@ if ($folderSpinouts.Count -gt 0) {
 }
 if ($tfvcConversions.Count -gt 0) {
     Write-Host "        ($($tfvcConversions.Count) of these need to be converted from TFVC to Git format)" -ForegroundColor DarkGray
+}
+if ($gitMoves.Count -gt 0) {
+    Write-Host "        ($($gitMoves.Count) existing Git repo(s) will be mirrored directly to the target)" -ForegroundColor DarkGray
 }
 Write-Host "    ● $($archiveRows.Count) repositories are marked for archive (will be skipped)" -ForegroundColor Yellow
 Write-Host "    ● $($skipRows.Count) rows will be skipped (system folders, missing data, etc.)" -ForegroundColor DarkGray
@@ -474,7 +492,7 @@ foreach ($grp in $migrateByCollection) {
     Write-Host "  Collection: $($grp.Name)" -ForegroundColor White
     foreach ($item in $grp.Group) {
         if ($item.Action -eq 'MigrateRepo') {
-            $typeNote = if ($item.RepoType -eq 'TFVC') { ' [convert to Git]' } else { '' }
+            $typeNote = if ($item.RepoType -eq 'TFVC') { ' [convert to Git]' } elseif ($item.RepoType -eq 'Git') { ' [mirror Git repo]' } else { '' }
             Write-Host "    → Migrate repo: $($item.Project)/$($item.Repo)$typeNote" -ForegroundColor DarkGray
         }
         else {
@@ -534,6 +552,9 @@ if ($Interactive) {
     Write-Host "  │  This will:                                              │" -ForegroundColor Yellow
     if ($tfvcConversions.Count -gt 0) {
         Write-Host "  │    • Convert $($tfvcConversions.Count.ToString().PadRight(4)) repos from TFVC to Git format     │" -ForegroundColor Yellow
+    }
+    if ($gitMoves.Count -gt 0) {
+        Write-Host "  │    • Mirror $($gitMoves.Count.ToString().PadRight(4)) existing Git repos directly             │" -ForegroundColor Yellow
     }
     if ($folderSpinouts.Count -gt 0) {
         Write-Host "  │    • Extract $($folderSpinouts.Count.ToString().PadRight(4)) folders into standalone repos      │" -ForegroundColor Yellow
@@ -651,13 +672,15 @@ foreach ($group in $grouped) {
                 -ConfigPath $ConfigPath `
                 -SourceCollection $sourceCollection `
                 -SourceProject $sourceProject `
-                -TfvcPath "`$/$sourceProject/$sourceRepo" `
                 -SourceServerUrl $SourceServerUrl `
                 -TargetCollection $TargetCollection `
                 -TargetProject $TargetProject `
                 -TargetRepoName $outputName `
                 -TargetServerUrl $TargetServerUrl `
-                -SkipConversion
+                -SourceRepoType $(if ($needsConversion) { 'TFVC' } else { 'Git' }) `
+                -TfvcPath $(if ($needsConversion) { "`$/$sourceProject/$sourceRepo" } else { $null }) `
+                -SourceRepoName $(if ($needsConversion) { $null } else { $sourceRepo }) `
+                -SkipConversion:$needsConversion
 
             $itemDuration = (Get-Date) - $itemStart
             $item.Status = 'Success'

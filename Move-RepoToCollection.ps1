@@ -6,7 +6,7 @@
 .DESCRIPTION
     Handles the scenario where legacy repos need to be reorganized across ADO collections.
     Process:
-    1. Converts the TFVC source to Git (via git-tfs)
+    1. Converts the TFVC source to Git (via git-tfs) or clones an existing Git repo
     2. Creates a new Git repo in the target ADO collection/project
     3. Pushes the converted repo to the target
 
@@ -29,8 +29,14 @@
 .PARAMETER SourceProject
     Source team project name (skipped in interactive mode).
 
+.PARAMETER SourceRepoType
+    Source repository type. TFVC uses git-tfs conversion; Git performs a mirror clone.
+
 .PARAMETER TfvcPath
     TFVC path to migrate (e.g., $/SourceProject/AppFolder).
+
+.PARAMETER SourceRepoName
+    Source Git repository name when SourceRepoType is Git.
 
 .PARAMETER TargetCollection
     Target ADO collection name.
@@ -60,6 +66,12 @@
     ./Move-RepoToCollection.ps1 -ConfigPath ./config/migration-config.json `
         -SourceCollection "GAMS" -SourceProject "LegacyApp" -TfvcPath "$/LegacyApp" `
         -TargetCollection "ModernApps" -TargetProject "Platform" -TargetRepoName "legacy-app"
+
+.EXAMPLE
+    # Move an existing Git repo between collections without TFVC conversion
+    ./Move-RepoToCollection.ps1 -ConfigPath ./config/migration-config.json `
+        -SourceCollection "Legacy" -SourceProject "Apps" -SourceRepoType Git -SourceRepoName "billing-api" `
+        -TargetCollection "GAMS-GIT-Repos" -TargetProject "Apps" -TargetRepoName "billing-api"
 #>
 
 [CmdletBinding()]
@@ -71,7 +83,10 @@ param(
 
     [string]$SourceCollection,
     [string]$SourceProject,
+    [ValidateSet('TFVC', 'Git')]
+    [string]$SourceRepoType = 'TFVC',
     [string]$TfvcPath,
+    [string]$SourceRepoName,
     [string]$SourceServerUrl,
     [string]$TargetCollection,
     [string]$TargetProject,
@@ -109,7 +124,7 @@ if (-not $TargetServerUrl) {
 
 if ($Interactive) {
     Show-MenuHeader -Title "Move TFVC Repo to Another Collection"
-    Write-Host "This wizard will walk you through selecting a source TFVC repo/folder" -ForegroundColor DarkGray
+    Write-Host "This wizard will walk you through selecting a source TFVC or Git repo" -ForegroundColor DarkGray
     Write-Host "and a destination collection/project to move it to." -ForegroundColor DarkGray
 
     # ── 1. Pick source collection ──
@@ -120,36 +135,55 @@ if ($Interactive) {
     $SourceProject = Select-AdoProject -Config $config -Collection $SourceCollection -ServerUrl $SourceServerUrl -Prompt 'Select SOURCE project'
     if (-not $SourceProject) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
-    # ── 3. Browse and pick a TFVC folder ──
-    $currentPath = "`$/$SourceProject"
-    while ($true) {
-        $selected = Select-TfvcFolders -Config $config -Collection $SourceCollection `
-            -ProjectName $SourceProject -ServerUrl $SourceServerUrl -ParentPath $currentPath -Prompt 'Select a folder to move (or drill deeper)'
-        if (-not $selected) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+    Show-MenuHeader -Title "Select SOURCE repo type"
+    $repoTypeChoice = Show-NumberedMenu -Items @('TFVC folder', 'Git repository') -Prompt 'Select source type' -AllowBack
+    if ($null -eq $repoTypeChoice) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
-        $chosenPath = $selected[0]
-        Write-Host ""
-        Write-Host "  Selected: $chosenPath" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "  [1] Use this folder as the source" -ForegroundColor White
-        Write-Host "  [2] Drill into this folder to pick a subfolder" -ForegroundColor White
-        Write-Host "  [0] Back" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "Choice: " -ForegroundColor Yellow -NoNewline
-        $drillChoice = Read-Host
+    switch ($repoTypeChoice) {
+        0 {
+            $SourceRepoType = 'TFVC'
+            $currentPath = "`$/$SourceProject"
+            while ($true) {
+                $selected = Select-TfvcFolders -Config $config -Collection $SourceCollection `
+                    -ProjectName $SourceProject -ServerUrl $SourceServerUrl -ParentPath $currentPath -Prompt 'Select a folder to move (or drill deeper)'
+                if (-not $selected) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
-        switch ($drillChoice.Trim()) {
-            '1' { $TfvcPath = $chosenPath; break }
-            '2' { $currentPath = $chosenPath; continue }
-            '0' { Write-Host "Cancelled." -ForegroundColor Yellow; return }
-            default { $TfvcPath = $chosenPath; break }
+                $chosenPath = $selected[0]
+                Write-Host ""
+                Write-Host "  Selected: $chosenPath" -ForegroundColor Green
+                Write-Host ""
+                Write-Host "  [1] Use this folder as the source" -ForegroundColor White
+                Write-Host "  [2] Drill into this folder to pick a subfolder" -ForegroundColor White
+                Write-Host "  [0] Back" -ForegroundColor DarkGray
+                Write-Host ""
+                Write-Host "Choice: " -ForegroundColor Yellow -NoNewline
+                $drillChoice = Read-Host
+
+                switch ($drillChoice.Trim()) {
+                    '1' { $TfvcPath = $chosenPath; break }
+                    '2' { $currentPath = $chosenPath; continue }
+                    '0' { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+                    default { $TfvcPath = $chosenPath; break }
+                }
+                if ($TfvcPath) { break }
+            }
         }
-        if ($TfvcPath) { break }
+        1 {
+            $SourceRepoType = 'Git'
+            $sourceRepo = Select-AdoGitRepo -Config $config -Collection $SourceCollection -ProjectName $SourceProject -ServerUrl $SourceServerUrl -Prompt 'Select SOURCE Git repo'
+            if (-not $sourceRepo) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+            $SourceRepoName = $sourceRepo.name
+        }
     }
 
     # ── 4. Pick target collection ──
     Show-MenuHeader -Title "Select DESTINATION"
-    Write-Host "  Source: $SourceCollection / $SourceProject / $TfvcPath" -ForegroundColor DarkGray
+    if ($SourceRepoType -eq 'Git') {
+        Write-Host "  Source: $SourceCollection / $SourceProject / $SourceRepoName" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "  Source: $SourceCollection / $SourceProject / $TfvcPath" -ForegroundColor DarkGray
+    }
     Write-Host ""
 
     $TargetCollection = Select-AdoCollection -Config $config -Prompt 'Select TARGET collection'
@@ -160,32 +194,47 @@ if ($Interactive) {
     if (-not $TargetProject) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     # ── 6. Repo name ──
-    $defaultName = ($TfvcPath -replace '^\$/', '' -replace '/', '-').ToLower()
+    if ($SourceRepoType -eq 'Git') {
+        $defaultName = $SourceRepoName
+    }
+    else {
+        $defaultName = ($TfvcPath -replace '^\$/', '' -replace '/', '-').ToLower()
+    }
     Write-Host ""
     Write-Host "  Git repo name [$defaultName]: " -ForegroundColor Yellow -NoNewline
     $nameInput = Read-Host
     $TargetRepoName = if ($nameInput.Trim()) { $nameInput.Trim() } else { $defaultName }
 
     # ── 7. History depth ──
-    Write-Host "  History depth (enter for full history, or a number): " -ForegroundColor Yellow -NoNewline
-    $depthInput = Read-Host
-    if ($depthInput.Trim() -match '^\d+$') {
-        $HistoryDepth = [int]$depthInput.Trim()
+    if ($SourceRepoType -eq 'TFVC') {
+        Write-Host "  History depth (enter for full history, or a number): " -ForegroundColor Yellow -NoNewline
+        $depthInput = Read-Host
+        if ($depthInput.Trim() -match '^\d+$') {
+            $HistoryDepth = [int]$depthInput.Trim()
+        }
     }
 
     # ── Confirm ──
     Show-MenuHeader -Title "Confirm Move"
     Write-Host "  Source Collection: $SourceCollection" -ForegroundColor White
     Write-Host "  Source Project:    $SourceProject" -ForegroundColor White
-    Write-Host "  TFVC Path:         $TfvcPath" -ForegroundColor White
+    Write-Host "  Source Type:       $SourceRepoType" -ForegroundColor White
+    if ($SourceRepoType -eq 'Git') {
+        Write-Host "  Source Repo:       $SourceRepoName" -ForegroundColor White
+    }
+    else {
+        Write-Host "  TFVC Path:         $TfvcPath" -ForegroundColor White
+    }
     Write-Host "  Target Collection: $TargetCollection" -ForegroundColor White
     Write-Host "  Target Project:    $TargetProject" -ForegroundColor White
     Write-Host "  Target Repo Name:  $TargetRepoName" -ForegroundColor White
-    if ($HistoryDepth) {
-        Write-Host "  History Depth:     $HistoryDepth changesets" -ForegroundColor White
-    }
-    else {
-        Write-Host "  History Depth:     Full" -ForegroundColor White
+    if ($SourceRepoType -eq 'TFVC') {
+        if ($HistoryDepth) {
+            Write-Host "  History Depth:     $HistoryDepth changesets" -ForegroundColor White
+        }
+        else {
+            Write-Host "  History Depth:     Full" -ForegroundColor White
+        }
     }
     Write-Host ""
     Write-Host "  Proceed? [Y/n]: " -ForegroundColor Yellow -NoNewline
@@ -200,14 +249,34 @@ if ($Interactive) {
 
 if (-not $SourceCollection) { throw "SourceCollection is required. Use -Interactive or provide -SourceCollection." }
 if (-not $SourceProject)    { throw "SourceProject is required. Use -Interactive or provide -SourceProject." }
-if (-not $TfvcPath)         { throw "TfvcPath is required. Use -Interactive or provide -TfvcPath." }
 if (-not $TargetCollection) { throw "TargetCollection is required. Use -Interactive or provide -TargetCollection." }
 if (-not $TargetProject)    { throw "TargetProject is required. Use -Interactive or provide -TargetProject." }
 if (-not $TargetRepoName)   { throw "TargetRepoName is required. Use -Interactive or provide -TargetRepoName." }
 
+switch ($SourceRepoType) {
+    'TFVC' {
+        if (-not $TfvcPath) {
+            throw "TfvcPath is required when SourceRepoType is TFVC. Use -Interactive or provide -TfvcPath."
+        }
+    }
+    'Git' {
+        if (-not $SourceRepoName) {
+            throw "SourceRepoName is required when SourceRepoType is Git. Use -Interactive or provide -SourceRepoName."
+        }
+    }
+}
+
+$sourceDescriptor = if ($SourceRepoType -eq 'Git') {
+    "$SourceCollection/$SourceProject/$SourceRepoName"
+}
+else {
+    "$SourceCollection/$SourceProject ($TfvcPath)"
+}
+
 Write-MigrationLog -Message "Starting cross-collection move" -LogFile $logFile -Level INFO
 Write-MigrationLog -Message "  Source URL: $SourceServerUrl" -LogFile $logFile
-Write-MigrationLog -Message "  Source: $SourceCollection/$SourceProject ($TfvcPath)" -LogFile $logFile
+Write-MigrationLog -Message "  Source Type: $SourceRepoType" -LogFile $logFile
+Write-MigrationLog -Message "  Source: $sourceDescriptor" -LogFile $logFile
 Write-MigrationLog -Message "  Target URL: $TargetServerUrl" -LogFile $logFile
 Write-MigrationLog -Message "  Target: $TargetCollection/$TargetProject/$TargetRepoName" -LogFile $logFile
 
@@ -234,8 +303,20 @@ if (-not $targetTest.Connected) {
     throw "Cannot connect to target collection '$TargetCollection': $($targetTest.Error)"
 }
 
+if ($SourceProject -notin $sourceTest.Projects) {
+    throw "Project '$SourceProject' not found in collection '$SourceCollection'. Available: $($sourceTest.Projects -join ', ')"
+}
+
 if ($TargetProject -notin $targetTest.Projects) {
     throw "Project '$TargetProject' not found in collection '$TargetCollection'. Available: $($targetTest.Projects -join ', ')"
+}
+
+if ($SourceRepoType -eq 'Git') {
+    $sourceRepos = @(Get-AdoGitRepositories -ServerUrl $SourceServerUrl -Collection $SourceCollection -ProjectName $SourceProject -Pat $sourcePat)
+    $sourceRepo = $sourceRepos | Where-Object { $_.name -eq $SourceRepoName } | Select-Object -First 1
+    if (-not $sourceRepo) {
+        throw "Git repo '$SourceRepoName' not found in '$SourceCollection/$SourceProject'. Available: $($sourceRepos.name -join ', ')"
+    }
 }
 
 Write-MigrationLog -Message "Source and target connections verified" -LogFile $logFile -Level SUCCESS
@@ -246,6 +327,20 @@ $localRepoPath = Join-Path $config.outputDirectory $TargetRepoName
 
 if ($SkipConversion) {
     Write-MigrationLog -Message "Step 1: Skipping conversion (already done upstream)" -LogFile $logFile -Level INFO
+}
+elseif ($SourceRepoType -eq 'Git') {
+    Write-MigrationLog -Message "Step 1: Cloning source Git repo '$SourceRepoName'" -LogFile $logFile -Level INFO
+
+    if (Test-Path $localRepoPath) {
+        Write-MigrationLog -Message "Removing existing local repo path: $localRepoPath" -LogFile $logFile -Level WARN
+        Remove-Item -Recurse -Force $localRepoPath
+    }
+
+    $sourceRemoteUrl = $sourceRepo.remoteUrl
+    $authenticatedSourceUrl = $sourceRemoteUrl -replace '://', "://:$sourcePat@"
+    Invoke-Git -Arguments "clone --mirror `"$authenticatedSourceUrl`" `"$localRepoPath`"" -LogFile $logFile
+
+    Write-MigrationLog -Message "Git clone complete" -LogFile $logFile -Level SUCCESS
 }
 else {
     Write-MigrationLog -Message "Step 1: Converting TFVC to Git" -LogFile $logFile -Level INFO
@@ -276,11 +371,14 @@ else {
     Write-MigrationLog -Message "Conversion complete" -LogFile $logFile -Level SUCCESS
 }
 
-if (-not (Test-Path (Join-Path $localRepoPath '.git'))) {
+if ($SourceRepoType -eq 'Git') {
+    if (-not (Test-Path (Join-Path $localRepoPath 'HEAD'))) {
+        throw "Clone failed — no mirrored Git repo found at $localRepoPath"
+    }
+}
+elseif (-not $SkipConversion -and -not (Test-Path (Join-Path $localRepoPath '.git'))) {
     throw "Conversion failed — no Git repo found at $localRepoPath"
 }
-
-Write-MigrationLog -Message "Conversion complete" -LogFile $logFile -Level SUCCESS
 
 # ─── Step 2: Create target Git repo in ADO ─────────────────────────────────────
 
@@ -338,8 +436,13 @@ $authenticatedUrl = $remoteUrl -replace '://', "://:$targetPat@"
 Invoke-Git -Arguments "remote add target `"$authenticatedUrl`"" -WorkingDirectory $localRepoPath -LogFile $logFile
 
 $defaultBranch = $config.defaultBranch ?? 'main'
-Invoke-Git -Arguments "push target $defaultBranch --force" -WorkingDirectory $localRepoPath -LogFile $logFile
-Invoke-Git -Arguments "push target --tags" -WorkingDirectory $localRepoPath -LogFile $logFile
+if ($SourceRepoType -eq 'Git') {
+    Invoke-Git -Arguments "push --mirror target" -WorkingDirectory $localRepoPath -LogFile $logFile
+}
+else {
+    Invoke-Git -Arguments "push target $defaultBranch --force" -WorkingDirectory $localRepoPath -LogFile $logFile
+    Invoke-Git -Arguments "push target --tags" -WorkingDirectory $localRepoPath -LogFile $logFile
+}
 
 # Remove remote with PAT from local config
 Invoke-Git -Arguments "remote remove target" -WorkingDirectory $localRepoPath -LogFile $logFile
@@ -350,7 +453,7 @@ Write-MigrationLog -Message "Push complete!" -LogFile $logFile -Level SUCCESS
 
 Write-Host ""
 Write-MigrationLog -Message "Cross-collection move complete!" -LogFile $logFile -Level SUCCESS
-Write-MigrationLog -Message "  Source:     $SourceCollection/$SourceProject ($TfvcPath)" -LogFile $logFile -Level SUCCESS
+Write-MigrationLog -Message "  Source:     $sourceDescriptor" -LogFile $logFile -Level SUCCESS
 Write-MigrationLog -Message "  Target:     $TargetCollection/$TargetProject/$TargetRepoName" -LogFile $logFile -Level SUCCESS
 Write-MigrationLog -Message "  Remote URL: $remoteUrl" -LogFile $logFile -Level SUCCESS
 Write-MigrationLog -Message "  Local copy: $localRepoPath" -LogFile $logFile -Level INFO

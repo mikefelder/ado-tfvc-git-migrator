@@ -277,14 +277,24 @@ foreach ($i in 0..($plan.migrations.Count - 1)) {
 
             'move' {
                 # Move across collections
-                & "$PSScriptRoot/Move-RepoToCollection.ps1" `
-                    -ConfigPath $ConfigPath `
-                    -SourceCollection $m.sourceCollection `
-                    -SourceProject $m.sourceProject `
-                    -TfvcPath $m.tfvcPath `
-                    -TargetCollection $m.targetCollection `
-                    -TargetProject $m.targetProject `
-                    -TargetRepoName $m.targetRepoName
+                $moveParams = @{
+                    ConfigPath       = $ConfigPath
+                    SourceCollection = $m.sourceCollection
+                    SourceProject    = $m.sourceProject
+                    SourceRepoType   = ($m.sourceRepoType ?? 'TFVC')
+                    TargetCollection = $m.targetCollection
+                    TargetProject    = $m.targetProject
+                    TargetRepoName   = $m.targetRepoName
+                }
+
+                if ($moveParams.SourceRepoType -eq 'Git') {
+                    $moveParams.SourceRepoName = $m.sourceRepoName
+                }
+                else {
+                    $moveParams.TfvcPath = $m.tfvcPath
+                }
+
+                & "$PSScriptRoot/Move-RepoToCollection.ps1" @moveParams
 
                 # Optionally push to GitHub as well
                 if ($m.gitHubOrg -and $m.gitHubRepo) {
@@ -294,7 +304,7 @@ foreach ($i in 0..($plan.migrations.Count - 1)) {
                         -RepoPath $repoPath `
                         -GitHubOrg $m.gitHubOrg `
                         -GitHubRepo $m.gitHubRepo `
-                        -Description ($m.description ?? "Migrated from $($m.sourceCollection)/$($m.tfvcPath)")
+                        -Description ($m.description ?? $(if ($moveParams.SourceRepoType -eq 'Git') { "Moved from $($m.sourceCollection)/$($m.sourceProject)/$($m.sourceRepoName)" } else { "Migrated from $($m.sourceCollection)/$($m.tfvcPath)" }))
                 }
             }
 

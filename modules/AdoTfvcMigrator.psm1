@@ -178,6 +178,25 @@ function Get-AdoProjects {
     return $result.value
 }
 
+function Get-AdoGitRepositories {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerUrl,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$ProjectName,
+        [Parameter(Mandatory)]
+        [string]$Pat
+    )
+
+    $encodedProject = [Uri]::EscapeDataString($ProjectName)
+    $url = "$ServerUrl/$Collection/$encodedProject/_apis/git/repositories"
+    $result = Invoke-AdoApi -Url $url -Pat $Pat
+    return $result.value
+}
+
 function Get-TfvcItems {
     [CmdletBinding()]
     param(
@@ -880,6 +899,40 @@ function Select-AdoProject {
     if ($null -eq $idx) { return $null }
 
     return $projectNames[$idx]
+}
+
+function Select-AdoGitRepo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Config,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$ProjectName,
+        [string]$ServerUrl,
+        [string]$Prompt = 'Select a Git repo'
+    )
+
+    $pat = $Config.collections[$Collection].pat
+    if (-not $ServerUrl) {
+        $ServerUrl = Get-ConfigAdoServerUrl -Config $Config -Role Source
+    }
+
+    Write-Host "  Fetching Git repos from '$Collection/$ProjectName'..." -ForegroundColor DarkGray
+    $repos = @(Get-AdoGitRepositories -ServerUrl $ServerUrl -Collection $Collection -ProjectName $ProjectName -Pat $pat |
+        Sort-Object name)
+
+    if ($repos.Count -eq 0) {
+        Write-Host "  No Git repos found in '$Collection/$ProjectName'." -ForegroundColor Red
+        return $null
+    }
+
+    Show-MenuHeader -Title "$Prompt (Project: $ProjectName)"
+    $idx = Show-NumberedMenu -Items $repos.name -Prompt $Prompt -AllowBack
+    if ($null -eq $idx) { return $null }
+
+    return $repos[$idx]
 }
 
 function Select-TfvcFolders {

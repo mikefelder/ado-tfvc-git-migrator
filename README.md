@@ -1,6 +1,6 @@
 so when # ADO TFVC-to-Git Migrator
 
-A PowerShell toolkit for migrating TFVC repositories from Azure DevOps Server 2022 to Git and GitHub Enterprise. Every script has a guided **interactive mode** with menus, so no command-line experience is required.
+A PowerShell toolkit for migrating TFVC repositories from Azure DevOps Server 2022 to Git and GitHub Enterprise, and for moving existing Git repos between ADO collections. Every script has a guided **interactive mode** with menus, so no command-line experience is required.
 
 ## Getting Started (Interactive)
 
@@ -34,8 +34,10 @@ The primary workflow for McDermott's migration. Reads the **MDR-4ADO-AllProjects
 
 - **Cross-endpoint supported** → Source can be ADO Server 2022 on-prem while target is Azure DevOps Services (configure `sourceAdoServerUrl` and `targetAdoServerUrl`).
 
-- **Column G = "Repo" + Recommendation = "Migrate"** → Converts the entire TFVC repo to Git as-is. If multiple spreadsheet rows reference the same repo (one per subfolder), it's only migrated once.
-- **Column G = "Folder" + Recommendation = "Migrate"** → Extracts that folder from the parent repo into a standalone Git repo named `RepoName_FolderName`. All folders from the same parent are extracted in a single batch.
+- **Column E = "Git" + Column G = "Repo" + Column H = "Migrate"** → Moves an existing Git repo directly into the target collection/project using a Git mirror push. This is the path to use for the ~40 existing Git repos going to `GAMS-GIT-Repos`.
+- **Column E = "TFVC" + Column G = "Repo" + Column H = "Migrate"** → Converts the entire TFVC repo to Git, then moves it to the target collection/project. If multiple spreadsheet rows reference the same repo (one per subfolder), it's only migrated once.
+- **Column E = "TFVC" + Column G = "Folder" + Column H = "Migrate"** → Extracts that folder from the parent repo into a standalone Git repo named `RepoName_FolderName`. All folders from the same parent are extracted in a single batch.
+- **Column E = "Git" + Column G = "Folder" + Column H = "Migrate"** → Skipped. Folder-level Git spin-outs are not supported by the batch migrator.
 - **Recommendation = "Archive"** → Skipped (not migrated).
 - **Collections not in your config** → Silently ignored (only collections you've set up with PATs are processed).
 
@@ -109,6 +111,13 @@ cp config/migration-config.example.json config/migration-config.json
 # 5. Push to GitHub Enterprise
 ./Push-ToGitHub.ps1 -ConfigPath ./config/migration-config.json `
     -RepoPath ./output/app-a-repo -GitHubOrg "McDermott" -GitHubRepo "app-a-repo"
+
+# 6. Move an existing Git repo between ADO collections
+./Move-RepoToCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection "LegacyApps" -SourceProject "SharedServices" `
+    -SourceRepoType Git -SourceRepoName "billing-api" `
+    -TargetCollection "GAMS-GIT-Repos" -TargetProject "SharedServices" `
+    -TargetRepoName "billing-api"
 ```
 
 ## Scripts
@@ -121,7 +130,7 @@ cp config/migration-config.example.json config/migration-config.json
 | `Invoke-TfvcDiscovery.ps1` | Scans collections and inventories all TFVC repos/folders | `-Interactive` |
 | `Convert-TfvcToGit.ps1` | Converts a TFVC repo to a Git repo via git-tfs | `-Interactive` |
 | `Split-TfvcToGitRepos.ps1` | Splits TFVC subfolders into separate Git repos | `-Interactive` |
-| `Move-RepoToCollection.ps1` | Moves/clones a TFVC repo to a different ADO collection as Git | `-Interactive` |
+| `Move-RepoToCollection.ps1` | Moves a TFVC folder or an existing Git repo to a different ADO collection as Git | `-Interactive` |
 | `Push-ToGitHub.ps1` | Pushes a converted Git repo to GitHub Enterprise | `-Interactive` |
 | `Invoke-ExcelMigration.ps1` | Batch migrate/split repos from the MDR spreadsheet | `-Interactive` |
 | `Invoke-ArchiveRepos.ps1` | Batch archive repos from the Dalptfs01 spreadsheet | `-Interactive` |

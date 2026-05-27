@@ -109,6 +109,29 @@ param(
 $ErrorActionPreference = 'Stop'
 Import-Module "$PSScriptRoot/modules/AdoTfvcMigrator.psm1" -Force
 
+function Get-GitBasicAuthHeaderValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Pat
+    )
+
+    # Azure DevOps Git endpoints are more reliable with a non-empty username.
+    $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("ado:$Pat"))
+    return "Authorization: Basic $token"
+}
+
+function Normalize-GitRemoteUrl {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Url
+    )
+
+    # Some on-prem ADO URLs include literal spaces in project names; Git expects encoded URLs.
+    return ($Url -replace ' ', '%20')
+}
+
 # ─── Load Config ───────────────────────────────────────────────────────────────
 
 $config = Read-MigrationConfig -ConfigPath $ConfigPath
@@ -336,9 +359,9 @@ elseif ($SourceRepoType -eq 'Git') {
         Remove-Item -Recurse -Force $localRepoPath
     }
 
-    $sourceRemoteUrl = $sourceRepo.remoteUrl
-    $authenticatedSourceUrl = $sourceRemoteUrl -replace '://', "://:$sourcePat@"
-    Invoke-Git -Arguments "clone --mirror `"$authenticatedSourceUrl`" `"$localRepoPath`"" -LogFile $logFile
+    $sourceRemoteUrl = Normalize-GitRemoteUrl -Url $sourceRepo.remoteUrl
+    $sourceAuthHeader = Get-GitBasicAuthHeaderValue -Pat $sourcePat
+    Invoke-Git -Arguments "-c http.extraHeader=`"$sourceAuthHeader`" clone --mirror `"$sourceRemoteUrl`" `"$localRepoPath`"" -LogFile $logFile
 
     Write-MigrationLog -Message "Git clone complete" -LogFile $logFile -Level SUCCESS
 }
@@ -429,19 +452,20 @@ else {
 
 Write-MigrationLog -Message "Step 3: Pushing to target repo" -LogFile $logFile -Level INFO
 
-# Construct authenticated URL (PAT embedded for push)
-$authenticatedUrl = $remoteUrl -replace '://', "://:$targetPat@"
+# Normalize URL and use auth header (avoid PAT-in-URL parsing edge cases).
+$normalizedTargetRemoteUrl = Normalize-GitRemoteUrl -Url $remoteUrl
+$targetAuthHeader = Get-GitBasicAuthHeaderValue -Pat $targetPat
 
 # Add remote and push
-Invoke-Git -Arguments "remote add target `"$authenticatedUrl`"" -WorkingDirectory $localRepoPath -LogFile $logFile
+Invoke-Git -Arguments "remote add target `"$normalizedTargetRemoteUrl`"" -WorkingDirectory $localRepoPath -LogFile $logFile
 
 $defaultBranch = $config.defaultBranch ?? 'main'
 if ($SourceRepoType -eq 'Git') {
-    Invoke-Git -Arguments "push --mirror target" -WorkingDirectory $localRepoPath -LogFile $logFile
+    Invoke-Git -Arguments "-c http.extraHeader=`"$targetAuthHeader`" push --mirror target" -WorkingDirectory $localRepoPath -LogFile $logFile
 }
 else {
-    Invoke-Git -Arguments "push target $defaultBranch --force" -WorkingDirectory $localRepoPath -LogFile $logFile
-    Invoke-Git -Arguments "push target --tags" -WorkingDirectory $localRepoPath -LogFile $logFile
+    Invoke-Git -Arguments "-c http.extraHeader=`"$targetAuthHeader`" push target $defaultBranch --force" -WorkingDirectory $localRepoPath -LogFile $logFile
+    Invoke-Git -Arguments "-c http.extraHeader=`"$targetAuthHeader`" push target --tags" -WorkingDirectory $localRepoPath -LogFile $logFile
 }
 
 # Remove remote with PAT from local config

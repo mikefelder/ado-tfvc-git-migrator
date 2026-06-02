@@ -515,15 +515,18 @@ if ($MoveProjectByName) {
     Write-MigrationLog -Message "Found $($projectRepos.Count) Git repo(s) in source project to move" -LogFile $logFile -Level INFO
 }
 
-if (($SourceRepoType -eq 'Git') -and (-not $MoveProjectByName)) {
-    $sourceRepos = @(Get-AdoGitRepositories -ServerUrl $SourceServerUrl -Collection $SourceCollection -ProjectName $SourceProject -Pat $sourcePat)
-    $sourceRepo = $sourceRepos | Where-Object { $_.name -eq $SourceRepoName } | Select-Object -First 1
-    if (-not $sourceRepo) {
-        throw "Git repo '$SourceRepoName' not found in '$SourceCollection/$SourceProject'. Available: $($sourceRepos.name -join ', ')"
-    }
+$executionMode = if ($MoveProjectByName) {
+    'ProjectMove(AllGitRepos)'
+}
+elseif ($SourceRepoType -eq 'Git') {
+    'SingleGitRepo'
+}
+else {
+    'TfvcPath'
 }
 
 Write-MigrationLog -Message "Source and target connections verified" -LogFile $logFile -Level SUCCESS
+Write-MigrationLog -Message "Execution mode: $executionMode" -LogFile $logFile -Level INFO
 
 # ─── Project move mode (all Git repos) ────────────────────────────────────────
 
@@ -597,6 +600,14 @@ if ($MoveProjectByName) {
     Write-MigrationLog -Message "  Repos moved: $movedCount" -LogFile $logFile -Level SUCCESS
     Write-MigrationLog -Message "  Log:        $logFile" -LogFile $logFile -Level INFO
     return
+}
+
+if ($SourceRepoType -eq 'Git') {
+    $sourceRepos = @(Get-AdoGitRepositories -ServerUrl $SourceServerUrl -Collection $SourceCollection -ProjectName $SourceProject -Pat $sourcePat)
+    $sourceRepo = $sourceRepos | Where-Object { $_.name -eq $SourceRepoName } | Select-Object -First 1
+    if (-not $sourceRepo) {
+        throw "Git repo '$SourceRepoName' not found in '$SourceCollection/$SourceProject'. Available: $($sourceRepos.name -join ', ')"
+    }
 }
 
 # ─── Step 1: Convert TFVC to Git ──────────────────────────────────────────────

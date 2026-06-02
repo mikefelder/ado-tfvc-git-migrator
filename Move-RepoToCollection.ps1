@@ -439,7 +439,7 @@ switch ($SourceRepoType) {
         }
     }
     'Git' {
-        if (-not $SourceRepoName) {
+        if ((-not $MoveProjectByName) -and (-not $SourceRepoName)) {
             throw "SourceRepoName is required when SourceRepoType is Git. Use -Interactive or provide -SourceRepoName."
         }
     }

@@ -38,6 +38,11 @@
 .PARAMETER SourceRepoName
     Source Git repository name when SourceRepoType is Git.
 
+.PARAMETER MoveProjectByName
+    Treat SourceProject as the TFVC source root and move the entire project using
+    the path $/SourceProject. This adds a project-level option without requiring
+    any config changes.
+
 .PARAMETER TargetCollection
     Target ADO collection name.
 
@@ -72,6 +77,12 @@
     ./Move-RepoToCollection.ps1 -ConfigPath ./config/migration-config.json `
         -SourceCollection "Legacy" -SourceProject "Apps" -SourceRepoType Git -SourceRepoName "billing-api" `
         -TargetCollection "GAMS-GIT-Repos" -TargetProject "Apps" -TargetRepoName "billing-api"
+
+.EXAMPLE
+    # Move an entire TFVC project by name
+    ./Move-RepoToCollection.ps1 -ConfigPath ./config/migration-config.json `
+        -SourceCollection "GAMS" -SourceProject "LegacyApp" -MoveProjectByName `
+        -TargetCollection "ModernApps" -TargetProject "Platform" -TargetRepoName "legacy-app"
 #>
 
 [CmdletBinding()]
@@ -87,6 +98,7 @@ param(
     [string]$SourceRepoType = 'TFVC',
     [string]$TfvcPath,
     [string]$SourceRepoName,
+    [switch]$MoveProjectByName,
     [string]$SourceServerUrl,
     [string]$TargetCollection,
     [string]$TargetProject,
@@ -159,11 +171,16 @@ if ($Interactive) {
     if (-not $SourceProject) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     Show-MenuHeader -Title "Select SOURCE repo type"
-    $repoTypeChoice = Show-NumberedMenu -Items @('TFVC folder', 'Git repository') -Prompt 'Select source type' -AllowBack
+    $repoTypeChoice = Show-NumberedMenu -Items @('Entire TFVC project', 'TFVC folder', 'Git repository') -Prompt 'Select source type' -AllowBack
     if ($null -eq $repoTypeChoice) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     switch ($repoTypeChoice) {
         0 {
+            $SourceRepoType = 'TFVC'
+            $MoveProjectByName = $true
+            $TfvcPath = "`$/$SourceProject"
+        }
+        1 {
             $SourceRepoType = 'TFVC'
             $currentPath = "`$/$SourceProject"
             while ($true) {
@@ -191,7 +208,7 @@ if ($Interactive) {
                 if ($TfvcPath) { break }
             }
         }
-        1 {
+        2 {
             $SourceRepoType = 'Git'
             $sourceRepo = Select-AdoGitRepo -Config $config -Collection $SourceCollection -ProjectName $SourceProject -ServerUrl $SourceServerUrl -Prompt 'Select SOURCE Git repo'
             if (-not $sourceRepo) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
@@ -220,6 +237,9 @@ if ($Interactive) {
     if ($SourceRepoType -eq 'Git') {
         $defaultName = $SourceRepoName
     }
+    elseif ($MoveProjectByName) {
+        $defaultName = $SourceProject
+    }
     else {
         $defaultName = ($TfvcPath -replace '^\$/', '' -replace '/', '-').ToLower()
     }
@@ -244,6 +264,9 @@ if ($Interactive) {
     Write-Host "  Source Type:       $SourceRepoType" -ForegroundColor White
     if ($SourceRepoType -eq 'Git') {
         Write-Host "  Source Repo:       $SourceRepoName" -ForegroundColor White
+    }
+    elseif ($MoveProjectByName) {
+        Write-Host "  TFVC Scope:        Entire project ($TfvcPath)" -ForegroundColor White
     }
     else {
         Write-Host "  TFVC Path:         $TfvcPath" -ForegroundColor White
@@ -278,6 +301,9 @@ if (-not $TargetRepoName)   { throw "TargetRepoName is required. Use -Interactiv
 
 switch ($SourceRepoType) {
     'TFVC' {
+        if ($MoveProjectByName) {
+            $TfvcPath = "`$/$SourceProject"
+        }
         if (-not $TfvcPath) {
             throw "TfvcPath is required when SourceRepoType is TFVC. Use -Interactive or provide -TfvcPath."
         }
@@ -291,6 +317,9 @@ switch ($SourceRepoType) {
 
 $sourceDescriptor = if ($SourceRepoType -eq 'Git') {
     "$SourceCollection/$SourceProject/$SourceRepoName"
+}
+elseif ($MoveProjectByName) {
+    "$SourceCollection/$SourceProject (entire project)"
 }
 else {
     "$SourceCollection/$SourceProject ($TfvcPath)"

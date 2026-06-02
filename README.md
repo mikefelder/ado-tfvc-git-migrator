@@ -118,6 +118,12 @@ cp config/migration-config.example.json config/migration-config.json
     -SourceRepoType Git -SourceRepoName "billing-api" `
     -TargetCollection "GAMS-GIT-Repos" -TargetProject "SharedServices" `
     -TargetRepoName "billing-api"
+
+# 7. Move an entire TFVC project by project name
+./Move-RepoToCollection.ps1 -ConfigPath ./config/migration-config.json `
+    -SourceCollection "GAMS" -SourceProject "MyProject" -MoveProjectByName `
+    -TargetCollection "ModernApps" -TargetProject "Platform" `
+    -TargetRepoName "my-project"
 ```
 
 ## Scripts
@@ -130,7 +136,7 @@ cp config/migration-config.example.json config/migration-config.json
 | `Invoke-TfvcDiscovery.ps1` | Scans collections and inventories all TFVC repos/folders | `-Interactive` |
 | `Convert-TfvcToGit.ps1` | Converts a TFVC repo to a Git repo via git-tfs | `-Interactive` |
 | `Split-TfvcToGitRepos.ps1` | Splits TFVC subfolders into separate Git repos | `-Interactive` |
-| `Move-RepoToCollection.ps1` | Moves a TFVC folder or an existing Git repo to a different ADO collection as Git | `-Interactive` |
+| `Move-RepoToCollection.ps1` | Moves an entire TFVC project, a TFVC folder, or an existing Git repo to a different ADO collection as Git | `-Interactive` |
 | `Push-ToGitHub.ps1` | Pushes a converted Git repo to GitHub Enterprise | `-Interactive` |
 | `Invoke-ExcelMigration.ps1` | Batch migrate/split repos from the MDR spreadsheet | `-Interactive` |
 | `Invoke-ArchiveRepos.ps1` | Batch archive repos from the Dalptfs01 spreadsheet | `-Interactive` |

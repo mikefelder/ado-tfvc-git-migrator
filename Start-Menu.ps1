@@ -96,7 +96,7 @@ while ($true) {
     Write-Host "  ── Migrate (one at a time) ────────────────────────────" -ForegroundColor DarkGray
     Write-Host "  [4]  Convert Repo          Convert a single repo from TFVC to Git" -ForegroundColor White
     Write-Host "  [5]  Split Repo            Break one large repo into smaller Git repos" -ForegroundColor White
-    Write-Host "  [6]  Move Repo             Move a repo to a different collection" -ForegroundColor White
+    Write-Host "  [6]  Move Project/Repo     Move a TFVC project, folder, or repo to a different collection" -ForegroundColor White
     Write-Host "  [7]  Push to GitHub        Send a converted repo to GitHub" -ForegroundColor White
     Write-Host ""
     Write-Host "  ── Batch (from spreadsheet) ───────────────────────────" -ForegroundColor DarkGray

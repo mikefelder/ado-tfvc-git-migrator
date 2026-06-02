@@ -1,17 +1,18 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Moves or clones a TFVC repo from one ADO collection/project to a different collection/project as a Git repo.
+    Moves or clones a TFVC project, folder, or Git repo from one ADO collection to another as Git.
 
 .DESCRIPTION
-    Handles the scenario where legacy repos need to be reorganized across ADO collections.
+    Handles the scenario where legacy TFVC projects/repos need to be reorganized across ADO collections.
     Process:
     1. Converts the TFVC source to Git (via git-tfs) or clones an existing Git repo
-    2. Creates a new Git repo in the target ADO collection/project
-    3. Pushes the converted repo to the target
+    2. Creates the target ADO project when moving an entire TFVC project by name
+    3. Creates a new Git repo in the target ADO collection/project
+    4. Pushes the converted repo to the target
 
-    Supports an -Interactive mode that walks you through selecting the source repo/folder
-    and the target collection/project via numbered menus.
+    Supports an -Interactive mode that walks you through selecting the source project,
+    repo, or folder and the target collection/project via numbered menus.
 
 .PARAMETER ConfigPath
     Path to migration-config.json.
@@ -51,10 +52,12 @@
     from config, then falls back to legacy adoServerUrl.
 
 .PARAMETER TargetProject
-    Target team project name.
+    Target team project name. When MoveProjectByName is used and TargetProject is omitted,
+    the script uses SourceProject and creates it in the target collection if needed.
 
 .PARAMETER TargetRepoName
-    Name for the new Git repo in the target project.
+    Name for the new Git repo in the target project. When MoveProjectByName is used and
+    TargetRepoName is omitted, the script uses SourceProject.
 
 .PARAMETER HistoryDepth
     Number of changesets to include. Null = full history.
@@ -81,8 +84,8 @@
 .EXAMPLE
     # Move an entire TFVC project by name
     ./Move-RepoToCollection.ps1 -ConfigPath ./config/migration-config.json `
-        -SourceCollection "GAMS" -SourceProject "LegacyApp" -MoveProjectByName `
-        -TargetCollection "ModernApps" -TargetProject "Platform" -TargetRepoName "legacy-app"
+    -SourceCollection "GAMS" -SourceProject "LegacyApp" -MoveProjectByName `
+    -TargetCollection "ModernApps"
 #>
 
 [CmdletBinding()]
@@ -144,6 +147,100 @@ function Normalize-GitRemoteUrl {
     return ($Url -replace ' ', '%20')
 }
 
+function Get-AdoProjectDetail {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerUrl,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$ProjectName,
+        [Parameter(Mandatory)]
+        [string]$Pat,
+        [switch]$IncludeCapabilities
+    )
+
+    $encodedProject = [Uri]::EscapeDataString($ProjectName)
+    $url = "$ServerUrl/$Collection/_apis/projects/$encodedProject"
+    if ($IncludeCapabilities) {
+        $url += '?includeCapabilities=true'
+    }
+
+    return Invoke-AdoApi -Url $url -Pat $Pat -ApiVersion '7.1'
+}
+
+function Wait-AdoOperation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$OperationUrl,
+        [Parameter(Mandatory)]
+        [string]$Pat,
+        [int]$TimeoutMinutes = 20
+    )
+
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    do {
+        $operation = Invoke-AdoApi -Url $OperationUrl -Pat $Pat -ApiVersion '7.1'
+        switch ($operation.status) {
+            'succeeded' { return $operation }
+            'failed' { throw "ADO operation failed: $($operation.resultMessage ?? $operation.detailedMessage ?? 'Unknown error')" }
+            'cancelled' { throw "ADO operation was cancelled." }
+        }
+
+        Start-Sleep -Seconds 5
+    }
+    while ((Get-Date) -lt $deadline)
+
+    throw "Timed out waiting for ADO operation to finish: $OperationUrl"
+}
+
+function Ensure-AdoProjectExists {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerUrl,
+        [Parameter(Mandatory)]
+        [string]$Collection,
+        [Parameter(Mandatory)]
+        [string]$ProjectName,
+        [Parameter(Mandatory)]
+        [string]$Pat,
+        [Parameter(Mandatory)]
+        [object]$SourceProjectDetails,
+        [string]$LogFile,
+        [int]$TimeoutMinutes = 20
+    )
+
+    $projects = @(Get-AdoProjects -ServerUrl $ServerUrl -Collection $Collection -Pat $Pat)
+    $existingProject = $projects | Where-Object { $_.name -eq $ProjectName } | Select-Object -First 1
+    if ($existingProject) {
+        return $existingProject
+    }
+
+    $templateTypeId = $SourceProjectDetails.capabilities.processTemplate.templateTypeId
+    if (-not $templateTypeId) {
+        $templateTypeId = '6b724908-ef14-45cf-84f8-768b5384da45'
+    }
+
+    $createBody = @{
+        name = $ProjectName
+        description = ($SourceProjectDetails.description ?? "Migrated from $($SourceProjectDetails.name)")
+        capabilities = @{
+            versioncontrol = @{ sourceControlType = 'Git' }
+            processTemplate = @{ templateTypeId = $templateTypeId }
+        }
+    }
+
+    Write-MigrationLog -Message "Creating target project '$ProjectName' in collection '$Collection'" -LogFile $LogFile -Level INFO
+    $operation = Invoke-AdoApi -Url "$ServerUrl/$Collection/_apis/projects" -Pat $Pat -Method POST -Body $createBody -ApiVersion '7.1'
+    Wait-AdoOperation -OperationUrl $operation.url -Pat $Pat -TimeoutMinutes $TimeoutMinutes | Out-Null
+    Write-MigrationLog -Message "Created target project '$ProjectName'" -LogFile $LogFile -Level SUCCESS
+
+    return Get-AdoProjectDetail -ServerUrl $ServerUrl -Collection $Collection -ProjectName $ProjectName -Pat $Pat
+}
+
 # ─── Load Config ───────────────────────────────────────────────────────────────
 
 $config = Read-MigrationConfig -ConfigPath $ConfigPath
@@ -158,9 +255,9 @@ if (-not $TargetServerUrl) {
 # ─── Interactive Mode ──────────────────────────────────────────────────────────
 
 if ($Interactive) {
-    Show-MenuHeader -Title "Move TFVC Repo to Another Collection"
-    Write-Host "This wizard will walk you through selecting a source TFVC or Git repo" -ForegroundColor DarkGray
-    Write-Host "and a destination collection/project to move it to." -ForegroundColor DarkGray
+    Show-MenuHeader -Title "Move TFVC Project or Repo to Another Collection"
+    Write-Host "This wizard will walk you through selecting a source TFVC project, folder, or Git repo" -ForegroundColor DarkGray
+    Write-Host "and a destination collection to move it to." -ForegroundColor DarkGray
 
     # ── 1. Pick source collection ──
     $SourceCollection = Select-AdoCollection -Config $config -Prompt 'Select SOURCE collection'
@@ -230,23 +327,33 @@ if ($Interactive) {
     if (-not $TargetCollection) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
 
     # ── 5. Pick target project ──
-    $TargetProject = Select-AdoProject -Config $config -Collection $TargetCollection -ServerUrl $TargetServerUrl -Prompt 'Select TARGET project'
-    if (-not $TargetProject) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+    if ($MoveProjectByName) {
+        $TargetProject = $SourceProject
+        Write-Host "  Target project will be created or reused as: $TargetProject" -ForegroundColor DarkGray
+        $TargetRepoName = $SourceProject
+        Write-Host "  Target Git repo will use the same name: $TargetRepoName" -ForegroundColor DarkGray
+    }
+    else {
+        $TargetProject = Select-AdoProject -Config $config -Collection $TargetCollection -ServerUrl $TargetServerUrl -Prompt 'Select TARGET project'
+        if (-not $TargetProject) { Write-Host "Cancelled." -ForegroundColor Yellow; return }
+    }
 
     # ── 6. Repo name ──
-    if ($SourceRepoType -eq 'Git') {
-        $defaultName = $SourceRepoName
+    if ($MoveProjectByName) {
+        $defaultName = $TargetRepoName
     }
-    elseif ($MoveProjectByName) {
-        $defaultName = $SourceProject
+    elseif ($SourceRepoType -eq 'Git') {
+        $defaultName = $SourceRepoName
     }
     else {
         $defaultName = ($TfvcPath -replace '^\$/', '' -replace '/', '-').ToLower()
     }
-    Write-Host ""
-    Write-Host "  Git repo name [$defaultName]: " -ForegroundColor Yellow -NoNewline
-    $nameInput = Read-Host
-    $TargetRepoName = if ($nameInput.Trim()) { $nameInput.Trim() } else { $defaultName }
+    if (-not $MoveProjectByName) {
+        Write-Host ""
+        Write-Host "  Git repo name [$defaultName]: " -ForegroundColor Yellow -NoNewline
+        $nameInput = Read-Host
+        $TargetRepoName = if ($nameInput.Trim()) { $nameInput.Trim() } else { $defaultName }
+    }
 
     # ── 7. History depth ──
     if ($SourceRepoType -eq 'TFVC') {
@@ -273,7 +380,7 @@ if ($Interactive) {
     }
     Write-Host "  Target Collection: $TargetCollection" -ForegroundColor White
     Write-Host "  Target Project:    $TargetProject" -ForegroundColor White
-    Write-Host "  Target Repo Name:  $TargetRepoName" -ForegroundColor White
+    Write-Host "  Target Git Repo:   $TargetRepoName" -ForegroundColor White
     if ($SourceRepoType -eq 'TFVC') {
         if ($HistoryDepth) {
             Write-Host "  History Depth:     $HistoryDepth changesets" -ForegroundColor White
@@ -292,6 +399,15 @@ if ($Interactive) {
 }
 
 # ─── Validate required params in non-interactive mode ──────────────────────────
+
+if ($MoveProjectByName) {
+    if (-not $TargetProject) {
+        $TargetProject = $SourceProject
+    }
+    if (-not $TargetRepoName) {
+        $TargetRepoName = $SourceProject
+    }
+}
 
 if (-not $SourceCollection) { throw "SourceCollection is required. Use -Interactive or provide -SourceCollection." }
 if (-not $SourceProject)    { throw "SourceProject is required. Use -Interactive or provide -SourceProject." }
@@ -359,7 +475,14 @@ if ($SourceProject -notin $sourceTest.Projects) {
     throw "Project '$SourceProject' not found in collection '$SourceCollection'. Available: $($sourceTest.Projects -join ', ')"
 }
 
-if ($TargetProject -notin $targetTest.Projects) {
+if ($MoveProjectByName) {
+    $sourceProjectDetails = Get-AdoProjectDetail -ServerUrl $SourceServerUrl -Collection $SourceCollection -ProjectName $SourceProject -Pat $sourcePat -IncludeCapabilities
+    if ($TargetProject -notin $targetTest.Projects) {
+        Ensure-AdoProjectExists -ServerUrl $TargetServerUrl -Collection $TargetCollection -ProjectName $TargetProject -Pat $targetPat -SourceProjectDetails $sourceProjectDetails -LogFile $logFile -TimeoutMinutes ($TimeoutMinutes ?? 20) | Out-Null
+        $targetTest = Test-AdoConnection -ServerUrl $TargetServerUrl -Collection $TargetCollection -Pat $targetPat
+    }
+}
+elseif ($TargetProject -notin $targetTest.Projects) {
     throw "Project '$TargetProject' not found in collection '$TargetCollection'. Available: $($targetTest.Projects -join ', ')"
 }
 

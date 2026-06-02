@@ -19,7 +19,7 @@ This launches a menu-driven interface:
 | **3** | Discover Repos | Scan all TFVC repos across your collections |
 | **4** | Convert Repo | Convert a single TFVC repo to Git |
 | **5** | Split Repo | Break one large repo into smaller Git repos by folder |
-| **6** | Move Repo | Move a repo to a different ADO collection |
+| **6** | Move Project/Repo | Move a TFVC project, folder, or repo to a different ADO collection |
 | **7** | Push to GitHub | Send a converted repo to GitHub Enterprise |
 | **8** | Run Migration Plan | Execute a saved migration plan JSON file |
 | **9** | Batch Migrate | Read the MDR spreadsheet and migrate/split repos in bulk |
@@ -122,8 +122,7 @@ cp config/migration-config.example.json config/migration-config.json
 # 7. Move an entire TFVC project by project name
 ./Move-RepoToCollection.ps1 -ConfigPath ./config/migration-config.json `
     -SourceCollection "GAMS" -SourceProject "MyProject" -MoveProjectByName `
-    -TargetCollection "ModernApps" -TargetProject "Platform" `
-    -TargetRepoName "my-project"
+    -TargetCollection "ModernApps"
 ```
 
 ## Scripts

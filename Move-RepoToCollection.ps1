@@ -515,7 +515,7 @@ if ($MoveProjectByName) {
     Write-MigrationLog -Message "Found $($projectRepos.Count) Git repo(s) in source project to move" -LogFile $logFile -Level INFO
 }
 
-if ($SourceRepoType -eq 'Git') {
+if (($SourceRepoType -eq 'Git') -and (-not $MoveProjectByName)) {
     $sourceRepos = @(Get-AdoGitRepositories -ServerUrl $SourceServerUrl -Collection $SourceCollection -ProjectName $SourceProject -Pat $sourcePat)
     $sourceRepo = $sourceRepos | Where-Object { $_.name -eq $SourceRepoName } | Select-Object -First 1
     if (-not $sourceRepo) {

@@ -770,7 +770,29 @@ foreach ($group in $grouped) {
             $folderName = $item.Folder
             $folderOutputName = $item.NewRepoName
             $folderOutputPath = Join-Path $config.outputDirectory $folderOutputName
-            $folderTfvcPath = "`$/$sourceProject/$folderName"
+
+            # Build the TFVC path robustly:
+            # - If folder is absolute ($/...) keep it.
+            # - If folder is relative (e.g. "McTime"), treat it as relative to source repo
+            #   so repo "TimeKeeping" + folder "McTime" becomes $/Project/TimeKeeping/McTime.
+            $normalizedFolder = ($folderName -replace '\\', '/').Trim()
+            $normalizedRepo = ($sourceRepo -replace '\\', '/').Trim('/').Trim()
+            if ($normalizedFolder -match '^\$/') {
+                $folderTfvcPath = $normalizedFolder
+            }
+            else {
+                $normalizedFolder = $normalizedFolder.TrimStart('/')
+                if ($normalizedRepo -and ($normalizedFolder -ieq $normalizedRepo -or $normalizedFolder -like "$normalizedRepo/*")) {
+                    $relativeUnderProject = $normalizedFolder
+                }
+                elseif ($normalizedRepo) {
+                    $relativeUnderProject = "$normalizedRepo/$normalizedFolder"
+                }
+                else {
+                    $relativeUnderProject = $normalizedFolder
+                }
+                $folderTfvcPath = "`$/$sourceProject/$relativeUnderProject"
+            }
 
             Write-Host ""
             Write-Host "  [$processedCount / $($migrateRows.Count)] ($pctComplete%)$etaStr" -ForegroundColor Cyan
@@ -794,6 +816,14 @@ foreach ($group in $grouped) {
                     -NonInteractive `
                     -TimeoutMinutes $cfgTimeoutMin `
                     -StallTimeoutMinutes $cfgStallMin
+
+                # Guardrail: fail fast if extraction produced no tracked files.
+                $extractedFileCount = @(
+                    Invoke-Git -Arguments 'ls-tree -r --name-only HEAD' -WorkingDirectory $folderOutputPath -LogFile $logFile
+                ).Count
+                if ($extractedFileCount -eq 0) {
+                    throw "Extracted repository is empty for TFVC path '$folderTfvcPath'. Verify folder mapping/path in the spreadsheet."
+                }
 
                 Write-Host "    ✓ Extracted '$folderName'" -ForegroundColor Green
                 Write-MigrationLog -Message "Successfully extracted '$folderName' as '$folderOutputName'" -LogFile $logFile -Level SUCCESS
